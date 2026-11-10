@@ -1,0 +1,30 @@
+[package]
+name = "ggit-helper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "ggit's helper binary (DESIGN.md): preview (PDF via hayro, heic via heic-rs → PNG; ggit-helper-lab r2) and diff colours (syntect; r3)."
+
+[features]
+default = ["hayro", "heicrs", "still", "syn-onig"]
+hayro = ["dep:hayro"]
+heicrs = ["dep:heic-rs"]
+still = ["image/gif", "image/webp"]
+# diff colours (ggit-helper-lab R3): syntect + two-face with the oniguruma regex engine (C; fancy-regex is 3-5x slower)
+syn-core = ["dep:syntect", "dep:two-face"]
+syn-onig = ["syn-core", "two-face/syntect-default-onig"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+sha2 = "0.10"
+hayro = { version = "0.9", optional = true }
+heic-rs = { version = "0.1", optional = true }
+similar = { version = "3", default-features = false, features = ["std"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing"], optional = true }
+two-face = { version = "0.5", default-features = false, optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
