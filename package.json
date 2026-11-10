@@ -3,6 +3,9 @@
   "private": true,
   "scripts": {
     "test": "node --test --test-concurrency=2 test/*.test.js",
-    "test:fast": "node --test --test-concurrency=2 test/detail.test.js test/diff.test.js test/drive.test.js test/fork.test.js test/generate.test.js test/layout.test.js test/parse-log.test.js test/sidebar.test.js test/store.test.js test/tabkey.test.js test/view-decisions.test.js test/views.test.js test/preview.test.js test/update.test.js"
+    "test:fast": "node --test --test-concurrency=2 test/detail.test.js test/diff.test.js test/drive.test.js test/fork.test.js test/generate.test.js test/layout.test.js test/parse-log.test.js test/sidebar.test.js test/store.test.js test/tabkey.test.js test/view-decisions.test.js test/views.test.js test/preview.test.js test/update.test.js test/tla.test.js test/tla-trace.test.js"
+  },
+  "devDependencies": {
+    "tla-ts": "0.0.8"
   }
 }

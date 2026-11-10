@@ -231,8 +231,8 @@ test("auto fetch: Pull being previewed or its dialog open → not started; other
   const Header = load("header.js", "Header"), h = Object.create(Header.prototype);
   h.st = { state: { pending: 0 } };
   assert.equal(h.autoFetchOk(), true);
-  h.busy = "pull"; assert.equal(h.autoFetchOk(), false);
-  h.busy = null; h.dialog = { kind: "pull" }; assert.equal(h.autoFetchOk(), false);
+  h.pulling = true; assert.equal(h.autoFetchOk(), false);
+  h.pulling = false; h.dialog = { kind: "pull" }; assert.equal(h.autoFetchOk(), false);
   h.dialog = { kind: "tag" }; assert.equal(h.autoFetchOk(), true);
 });
 
@@ -261,4 +261,103 @@ test("result text: unknown with its own reason → that reason; a timeout or kil
     "Result unknown: f: Result written, but staging failed; inspect the file and index. fatal: lock");
   assert.match(text({ operation: "push", outcome: "unknown", reason: "timeout-or-not-started" }), /^Result unknown \(timed out after 30 s/);
   assert.match(text({ operation: "commit", outcome: "unknown", reason: "killed", stderr: "x" }), /^Result unknown \(timed out after 30 s/);
+});
+
+// Header's own guards around Pull, with its methods loaded in a VM and the store as a serial chain.
+const pullHeader = (preview) => {
+  const Header = load("header.js", "Header", { previewPull: preview, ggSettings: () => ({}) });
+  const h = Object.create(Header.prototype), log = [];
+  h.st = { ...chain(log), state: { pending: 0 }, refresh: async () => {} };
+  h.g = { pull: async () => ({ outcome: "completed" }), fetch: async () => { log.push("fetch-outside-queue"); return { outcome: "completed" }; } };
+  h.refs = "a\nb\n"; // what rev-parse HEAD @{upstream} prints now
+  h.t = { root: "/r" }; h.h = { branch: "main" }; h.ad = { run: async () => ({ code: 0, stdout: h.refs }) }; h.states = [];
+  h.setSnack = (_cx, o) => { if (o?.r) h.result = o.r; };
+  return { h, log };
+};
+const later = () => { let open; const p = new Promise((r) => (open = r)); return [p, open]; };
+const basis = (head, up, extra = {}) => ({ ok: true, data: { basis: { headOid: head, upstreamOid: up }, predicted: "clean", ...extra } });
+
+test("auto fetch: another operation finishing during a Pull preview does not resume it", async () => {
+  const [held, open] = later(), { h } = pullHeader(() => held);
+  h.pull(cx); await tick();
+  h.op("stage", async () => ({ outcome: "completed" }), cx); await tick(); await tick();
+  assert.equal(h.autoFetchOk(), false, "preview still running");
+  open(basis("a", "b")); for (let i = 0; i < 6; i++) await tick();
+  assert.equal(h.autoFetchOk(), true, "pull settled");
+});
+
+test("fetch: a Fetch clicked while a Pull waits in the queue runs after it, not before", async () => {
+  const { h, log } = pullHeader(async () => basis("a", "b"));
+  const [held, open] = later();
+  h.op("stage", () => held, cx); await tick();      // something ahead in the queue
+  h.pull(cx); for (let i = 0; i < 4; i++) await tick(); // preview done, pull queued behind stage
+  const f = h.fetchTask(cx, false); await tick();
+  assert.ok(!log.includes("fetch-outside-queue"), "fetch did not run outside the queue ahead of the pull");
+  open({ outcome: "completed" }); await f; for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(log.filter((x) => x !== "fetch-outside-queue"), ["stage", "pull", "fetch"]);
+});
+
+test("pull confirm: a change seen while re-reading (observed-basis-changed) shows a fresh preview, even with the same OIDs", async () => {
+  const moved = basis("a", "b", { predicted: "unknown", history: { result: "unknown", reason: "observed-basis-changed" } });
+  const { h, log } = pullHeader(async () => moved);
+  await h.pullTask(cx, { ok: true, basis: "a:b" }); for (let i = 0; i < 4; i++) await tick();
+  assert.equal(h.dialog?.kind, "pull"); assert.equal(h.dialog.stale, true); assert.deepEqual(log, []);
+});
+
+test("detach: a second click after the 60 s search found no pane does not start another split", async () => {
+  const splits = [];
+  const GraphView = load("graph.js", "GraphView", { panes: () => [{ pane: "g", mod: "git-grapher", tab: "t" }], shared: () => null,
+    run: (cmd) => { if (cmd === "pane.split") splits.push(cmd); } });
+  const gv = Object.create(GraphView.prototype); gv.tab = "t";
+  const tasks = [], fast = { ...cx, sleep: async () => {}, spawn(fn) { const t = fn(fast); tasks.push(t); return t; } };
+  gv.detach("bottom", fast); await Promise.all(tasks); // the whole search ran out
+  gv.detach("bottom", fast); await Promise.all(tasks);
+  assert.equal(splits.length, 1);
+});
+
+test("pull: a Fetch started during the confirm-time preview that moves upstream → the pull is refused as stale, git pull not run", async () => {
+  const [held, open] = later(), { h, log } = pullHeader(() => held);
+  const [fetchHeld, fetchDone] = later();
+  h.g.fetch = async () => { log.push("fetch"); await fetchHeld; h.refs = "a\nc\n"; return { outcome: "completed" }; };
+  h.pull = h.pull; const pulled = []; const gpull = h.g.pull; h.g.pull = async (t) => { pulled.push(t); return gpull(t); };
+  const confirm = h.pullTask(cx, { ok: true, basis: "a:b" }); await tick();
+  const f = h.fetchTask(cx, false); await tick();          // pressed while the preview reads
+  open(basis("a", "b")); await confirm; await tick();       // preview still sees a:b, pull queued
+  fetchDone(); await f; for (let i = 0; i < 8; i++) await tick();
+  assert.deepEqual(pulled, []); assert.equal(h.result?.reason, "stale");
+});
+
+test("auto fetch: two Pull previews at once — the first settling does not resume auto fetch while the second reads", async () => {
+  const gates = [later(), later()]; let i = 0;
+  const { h } = pullHeader(() => gates[i++][0]);
+  h.pull(cx); await tick(); h.pull(cx); await tick();
+  gates[0][1](basis("a", "b")); for (let k = 0; k < 8; k++) await tick();
+  assert.equal(h.autoFetchOk(), false);
+  gates[1][1](basis("a", "b")); for (let k = 0; k < 8; k++) await tick();
+  assert.equal(h.autoFetchOk(), true);
+});
+
+test("detach: a slow split whose pane claimed the key and was docked does not block the next Detach", async () => {
+  let list = [{ pane: "g", mod: "git-grapher", tab: "t" }], key = null; const splits = [];
+  const GraphView = load("graph.js", "GraphView", { panes: () => list, shared: () => key, setShared: (_k, v) => { key = v; },
+    run: (cmd) => { if (cmd === "pane.split") splits.push(cmd); } });
+  const gv = Object.create(GraphView.prototype); gv.tab = "t";
+  const tasks = [], fast = { ...cx, sleep: async () => {}, spawn(fn) { const t = fn(fast); tasks.push(t); return t; } };
+  gv.detach("bottom", fast); await Promise.all(tasks);      // search ran out
+  list = [...list, { pane: "d", mod: "git-grapher", tab: "t" }]; key = "d"; // the pane appears and claims the key
+  assert.equal(gv.detailPane()?.pane, "d");
+  list = list.filter((x) => x.pane !== "d");                // docked
+  gv.detach("bottom", fast); await Promise.all(tasks);
+  assert.equal(splits.length, 2);
+});
+
+test("pull: no basis to compare (no upstream / detached / unborn, 'Pull anyway') or a failed final read → git pull decides; observed different refs → stale", async () => {
+  for (const [basisStr, refs, code, want] of [["a:null", "", 128, "pull"], ["null:null", "", 128, "pull"], [null, "", 128, "pull"],
+    ["a:b", "", 128, "pull"], ["a:b", "a\nb\n", 0, "pull"], ["a:b", "a\nc\n", 0, "stale"]]) {
+    const { h } = pullHeader(async () => ({ ok: false }));
+    let pulled = 0; h.g.pull = async () => { pulled++; return { outcome: "completed" }; };
+    h.ad = { run: async () => ({ code, stdout: refs, stderr: "fatal" }) };
+    const r = await h.pullAt(basisStr);
+    assert.equal(r.reason === "stale" ? "stale" : pulled ? "pull" : "none", want, `${basisStr} ${code}`);
+  }
 });

@@ -302,7 +302,7 @@ export class GraphView {
     cx.notify();
   }
   selectNow(sha) { this.sel = sha; this.write(null); } // a new commit (or none) closes the diff
-  // file = { path, old? } | null. Only the graph writes sha; file is also written by the detail (docs/protocol.md).
+  // file = { path, old? } | null. Only the graph writes sha; file is also written by the detail.
   write(file) {
     if (!this.tab) return;
     const n = nextN(shared("ggit.tab." + this.tab), shared("ggit.file." + this.tab));
@@ -341,7 +341,8 @@ export class GraphView {
     if (!this.tab) return null;
     const id = shared("ggit.detail." + this.tab), all = panes();
     const keyed = id ? all.find((x) => x.pane === id) : null;
-    if (keyed) return keyed;
+    // A pane born after the pending split that has claimed the key is that split's pane: the split is done.
+    if (keyed) { if (this.split && !this.split.before.has(keyed.pane)) this.split = null; return keyed; }
     const born = this.split && all.find((x) => x.mod === "git-grapher" && x.tab === this.tab && !this.split.before.has(x.pane));
     if (born) { setShared("ggit.detail." + this.tab, born.pane); this.split = null; } // adopt it
     return born ?? null;
@@ -458,9 +459,11 @@ export class GraphView {
 
   // Detach splits the pane, then sizes the detail pane. run() returns null, so find the new pane via panes(),
   // which may take a frame, and set both weights with layout.resize.
-  // Allow only one pending split so repeated clicks cannot create competing detail panes.
+  // Allow only one split until its pane is found: `split` stays set past the 60 s search (a slow split is adopted later by
+  // detailPane), so a second click cannot start a competing one.
+  // ponytail: a split that never appears blocks Detach until the copy reloads; run() reports no failure to tell it apart.
   detach(side, cx) {
-    const me = this.me(); if (!me || this.detaching || this.detailPane()) return;
+    const me = this.me(); if (!me || this.detaching || this.split || this.detailPane()) return;
     this.detaching = true;
     // Always below ggit, whichever side the drawer was on.
     const before = new Set(panes().map((p) => p.pane)), share = DRAWER.bottom;

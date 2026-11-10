@@ -233,9 +233,10 @@ export class Header {
     this.upd = { ...this.upd, busy: mode, text: null }; cx.notify();
     cx.spawn(async (cx) => { const r = await runUpdate(mode, tag); this.upd = { ...this.upd, busy: null, text: r.text, ...(r.ok && mode === "helper" ? { helper: true } : {}) }; cx.notify(); });
   }
-  // Pause automatic fetching while Pull is previewing or its dialog is open, keeping the displayed prediction's refs stable.
-  // Confirmation still replans before pulling.
-  autoFetchOk() { return !this.autoStopped && !this.fetching && !(this.st?.state.pending > 0) && this.busy !== "pull" && this.dialog?.kind !== "pull"; }
+  // Pause automatic fetching from the start of a Pull preview until that pull settles (previewing, dialog open, queued or
+  // running), so the shown prediction stays true. `pulling` counts Pull requests: `busy` is shared by every operation.
+  // This keeps the dialog steady; what makes the pull safe is the basis check right before `git pull` (pullAt).
+  autoFetchOk() { return !this.autoStopped && !this.fetching && !(this.st?.state.pending > 0) && !(this.pulling > 0) && this.dialog?.kind !== "pull"; }
   // From the store after each read (the graph calls it).
   // git refuses a pull now: a merge or cherry-pick in progress, or files still unmerged.
   pullRefused() { return this.states.some((s) => s.gitRefuses) || (this.h?.unmerged ?? 0) > 0; }
@@ -246,19 +247,20 @@ export class Header {
   fetch(cx, auto) { cx.spawn((cx) => this.fetchTask(cx, auto)); }
   async fetchTask(cx, auto) {
     if (this.fetching || !this.h) return;
-    if (auto && this.netRunning) return;
+    if (auto && (this.netRunning || this.netQueued)) return;
     this.fetching = true; if (!auto) this.setSnack(cx, { busy: "fetch" }); cx.notify();
     // Fetch stays outside the write queue so its 30 s exec limit cannot block staging. It touches refs, not the index.
     // Network jobs cannot overlap: Pull / Push await an active fetch; a Fetch clicked during either queues behind it.
     let r;
     try {
-      const queued = !!this.netRunning, job = queued ? this.st.write("fetch", () => this.g.fetch(this.t, this.h)) : this.g.fetch(this.t, this.h);
+      // A Pull / Push already queued counts as running: a Fetch slipping in before it would move the refs it was planned on.
+      const queued = !!(this.netRunning || this.netQueued), job = queued ? this.st.write("fetch", () => this.g.fetch(this.t, this.h)) : this.g.fetch(this.t, this.h);
       this.fetchJob = job.catch(() => null);
       // Pull / Push await only an outside-queue fetch. Waiting for a fetch queued behind them would deadlock
       // a Push -> Push -> Fetch sequence.
       if (!queued) this.freeFetch = this.fetchJob;
       r = await job;
-    } catch (e) { r = { operation: "fetch", outcome: "unknown", reason: String(e?.message ?? e) }; } // F3rd: a throw latched "fetching"
+    } catch (e) { r = { operation: "fetch", outcome: "unknown", reason: String(e?.message ?? e) }; } // a throw must not leave "fetching" set
     finally { this.fetchJob = null; this.freeFetch = null; this.fetching = false; }
     this.refresh();
     if (!auto) this.setSnack(cx, { busy: null, r }); // auto fetch stays quiet: its state is the status block
@@ -274,13 +276,14 @@ export class Header {
     this.busy = name; this.menu = null; this.setSnack(cx, { busy: name });
     // Await an active outside-queue fetch before Pull / Push so network jobs cannot overlap.
     const net = name === "pull" || name === "push";
+    if (net) this.netQueued = (this.netQueued ?? 0) + 1;
     cx.spawn(async (cx) => {
       const r = await this.st.write(name, async () => {
         if (!net) return fn();
         if (this.freeFetch) await this.freeFetch;
         this.netRunning = true;
         try { return await fn(); } finally { this.netRunning = false; }
-      });
+      }).finally(() => { if (net) this.netQueued--; if (name === "pull") this.pulling = Math.max(0, (this.pulling ?? 0) - 1); });
       if (this.busy === name) this.busy = null;
       // git refused to switch over local changes → the choice to stash them first, instead of a red card.
       if (r?.operation === "switch" && r.outcome === "refused" && !r.stashed && /would be overwritten/.test(r.stderr ?? "")) {
@@ -294,15 +297,31 @@ export class Header {
   pull(cx, confirmed = null) { cx.spawn((cx) => this.pullTask(cx, confirmed)); }
   async pullTask(cx, confirmed) {
     if (!confirmed && this.states.length) { this.dialog = { kind: "states" }; cx.notify(); return; }
-    this.busy = "pull"; this.dialog = null; this.setSnack(cx, { busy: "preview" });
+    this.busy = "pull"; this.pulling = (this.pulling ?? 0) + 1; this.dialog = null; this.setSnack(cx, { busy: "preview" });
     if (this.fetchJob) await this.fetchJob; // predict on the refs a running fetch brings, not the ones before it
     const p = await previewPull(this.ad.run, { cwd: this.t.root }).catch((e) => ({ ok: false, error: { message: String(e) } }));
     this.busy = null; this.snack = null;
     const basis = p.ok ? `${p.data.basis.headOid}:${p.data.basis.upstreamOid}` : null;
     // Re-read HEAD and upstream when confirming; if the prediction's basis changed, show a fresh prediction instead.
-    const stale = confirmed?.basis && basis !== confirmed.basis;
-    if (!stale && (confirmed?.ok || (p.ok && p.data.predicted === "clean"))) return this.op("pull", () => this.g.pull(this.t), cx);
+    // A change the preview saw while it read (observed-basis-changed) is stale too, even if HEAD and upstream look the same.
+    const moved = p.ok && p.data.history?.reason === "observed-basis-changed";
+    const stale = !!confirmed && ((confirmed.basis && basis !== confirmed.basis) || moved);
+    if (!stale && (confirmed?.ok || (p.ok && p.data.predicted === "clean"))) return this.op("pull", () => this.pullAt(basis), cx);
+    this.pulling = Math.max(0, this.pulling - 1); // the dialog keeps auto fetch paused from here (dialog.kind)
     this.dialog = { kind: "pull", p, basis, stale, at: new Date(), open: ggSettings().verbose }; cx.notify();
+  }
+
+  // Run inside the write queue, after any fetch running outside it has finished: pull only if HEAD and upstream are still
+  // what the preview read. Any fetch (automatic, pressed, another copy's, another program's) that moved them makes it stale.
+  // It refuses only when it read both refs and they differ. With no basis to compare (no upstream, detached or unborn
+  // HEAD: "Pull anyway") or a read that fails, git pull decides, as on the command line.
+  // ponytail: a ref moving between this check and git pull's own start is still possible; git pull itself is the last word.
+  async pullAt(basis) {
+    const r = /^[0-9a-f]+:[0-9a-f]+$/.test(basis ?? "") ? await this.ad.run(["rev-parse", "HEAD", "@{upstream}"], { cwd: this.t.root }).catch(() => null) : null;
+    const now = r?.code === 0 ? r.stdout.trim().split("\n").join(":") : null;
+    if (now && now !== basis) return { operation: "pull", outcome: "refused", reason: "stale",
+      stderr: "The branch or its upstream moved after the preview. Pull again to see what it would do now." };
+    return this.g.pull(this.t);
   }
 
   createBranch(cx) {
