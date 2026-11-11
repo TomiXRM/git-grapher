@@ -67,6 +67,20 @@ export function summary(files) {
   return [..."MADRCTU", "?"].filter((s) => n.has(s)).map((s) => `${n.get(s)} ${WORD[s]}`).join(" · ");
 }
 
+// Untracked files ("ls-files --others -z" output) as added rows with real line counts: one
+// "diff --no-index --numstat /dev/null <path>" each ("-" = binary). read(args) runs git in the worktree root.
+// ponytail: only the first 50 are counted (16 at a time, exec caps near 49 open); the rest show 0 until staged.
+export async function untrackedFiles(read, others, cap = 50) {
+  const files = others.split("\0").filter(Boolean).map((p) => ({ path: p, status: "A", add: 0, del: 0, binary: false, untracked: true }));
+  const some = files.slice(0, cap);
+  for (let i = 0; i < some.length; i += 16) await Promise.all(some.slice(i, i + 16).map(async (f) => {
+    const r = await Promise.resolve().then(() => read(["diff", "--no-index", "--no-color", "--no-ext-diff", "--numstat", "--", "/dev/null", f.path])).catch(() => null);
+    const m = /^(-|\d+)\t(-|\d+)\t/.exec(r?.stdout ?? "");
+    if (m?.[1] === "-") f.binary = true; else if (m) { f.add = +m[1]; f.del = +m[2]; }
+  }));
+  return files;
+}
+
 // 5-square bar per file, own share only (as the ref: +1 is five greens). Any side that is non-zero keeps >= 1 square.
 export function bar(add, del, n = 5) {
   const tot = add + del;

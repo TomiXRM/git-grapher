@@ -13,7 +13,7 @@ import { gitRun } from "./run.js";
 import { div, h_flex, image, svg, v_flex, v_virtual_list, list, Textarea } from "./ui/zoom.js";
 import { Scrollbar, TextareaState, TextView, Popup } from "gpui-base";
 import { exec, settings, panes, focused, hc, run } from "herdr";
-import { READ, META_FORMAT, DATE, parseMeta, diffArgs, parseDiffTree, wipLists, summary, bar, buildTree, treeRows, isWide, refLabels, forkPoint, EMPTY_TREE } from "./lib/detail.js";
+import { READ, META_FORMAT, DATE, parseMeta, diffArgs, parseDiffTree, wipLists, untrackedFiles, summary, bar, buildTree, treeRows, isWide, refLabels, forkPoint, EMPTY_TREE } from "./lib/detail.js";
 import { avatarFile, initial, tint } from "./avatar.js";
 
 // "Co-authored-by: Name <email>" -> { name, email }; anything else -> null.
@@ -214,7 +214,7 @@ export class DetailView {
       git(["diff", "--cached", "--no-color", "--no-ext-diff", "-r", "-z", "-M", "--raw", "--numstat"]),
       git(["diff", "--no-color", "--no-ext-diff", "-r", "-z", "--raw", "--numstat"]),
     ]);
-    const untracked = others.split("\0").filter(Boolean).map((p) => ({ path: p, status: "A", add: 0, del: 0, binary: false, untracked: true }));
+    const untracked = await untrackedFiles(run, others);
     const files = [...parseDiffTree(diff), ...untracked];
     return { wip: true, base, path, machine, ...wipLists(cached, worktree, untracked), branch: branch.trim() || null, sha: "", parents: [], subject: "Uncommitted changes", name: "", email: null, date: "",
       body: [], trailers: [], refs: [], files, tree: buildTree(files), git };
@@ -431,14 +431,14 @@ export class DetailView {
       : `commit ${c.sha.slice(0, 12)} "${c.subject}"`;
     return `In the git repo ${repo}, about ${what}:\n\n${q}`;
   }
-  askBar(c, t, dim) {
+  askBar(c, t, dim, head = {}) {
     if (c.wip) return div();
     const key = this.key, open = this.ask?.key === key, line = alpha(t.foreground, "1f");
     const btn = h_flex().id("ask").h(22).px(7).gap(5).items_center().rounded(5).cursor_pointer().text_size(12).text_color(open ? t.foreground : dim)
       .border_1().border_color(open ? t.accent ?? line : line).hover((h) => h.bg(t.hover ?? t.raised))
       .on_click((_e, cx) => { this.ask = open ? null : { key, target: this.ask?.target ?? "new" }; cx.notify(); if (!open) this.askBox.focus(); })
       .child(svg("mods/git-grapher/icons/message-circle-question.svg").size(14).text_color(open ? t.foreground : dim)).child("Ask");
-    const bar = h_flex().px(10).pt(8).justify_end().child(btn);
+    const bar = this.head(t, dim, head.title, [btn, head.actions]);
     if (!open) return bar;
     const picker = askPicker(t, this.ask, "ask"); // ask.js: a new pane, or an agent pane already open
     const send = div().id("ask-send").h(24).px(12).flex_none().flex().items_center().rounded(6).cursor_pointer().text_size(12)
@@ -582,7 +582,12 @@ export class DetailView {
     return j < 0 || j >= list.length ? null : list[j];
   }
 
-  files(c, t, dim) {
+  // A header row: the host's title on the left, then the given items (null skipped) on the right.
+  head(t, dim, title, items) {
+    return h_flex().px(10).pt(8).gap(6).items_center().child(div().flex_1().min_w(0).truncate().text_size(12).text_color(dim).child(title ?? ""))
+      .children(items.filter(Boolean));
+  }
+  files(c, t, dim, actions = null) {
     // generated files (lockfiles, minified, source maps) fold under "Generated (N)" at the end.
     const gen = c.files.filter((f) => generated(f.path)), own = gen.length ? c.files.filter((f) => !generated(f.path)) : c.files;
     if (c.ownFor !== c.files) { c.ownFor = c.files; c.ownTree = gen.length ? buildTree(own) : c.tree; }
@@ -597,6 +602,7 @@ export class DetailView {
     return v_flex().size_full().min_h(0).text_size(13)
       .child(h_flex().px(10).pt(8).pb(4).items_center().gap(4).text_size(12)
         .child(div().flex_1().text_color(dim).child(summary(c.files)))
+        .children(actions ? [actions] : [])
         .child(segmented({ id: "mode", t, value: this.mode, options: [{ value: "path", label: "Path" }, { value: "tree", label: "Tree" }],
           onChange: (m, cx) => { this.mode = m; cx.notify(); } })))
       .child(v_flex().id("file-list").flex_1().min_h(0).p(6).overflow_y_scrollbar().children(rows)
@@ -639,8 +645,8 @@ export class DetailView {
     return contextMenu(t, { x: m.x, y: m.y, paneW: this.size?.width, paneH: this.size?.height, title: m.f.path.split("/").pop(), sections, onClose: close });
   }
 
-  renderBody(sel, { size, wide: force, t, cx, file = null, onFile = null, onBranch = null, onHistory = null, store = null }) {
-    this.onHistory = onHistory;
+  renderBody(sel, { size, wide: force, t, cx, file = null, onFile = null, onBranch = null, onHistory = null, store = null, title = null, actions = null }) {
+    this.onHistory = onHistory; this.headed = false;
     this.sync(sel, cx);
     // The host's WIP scan saw a change (an edit in a terminal): the commit pane's lists follow.
     // The store read again (a write, a watch event, the poll): a WIP view reads its lists again too.
@@ -689,8 +695,14 @@ export class DetailView {
     // Scroll both sections independently so long messages cannot push files out of view.
     // ponytail: use overflow_y_scroll without a visible scrollbar because the scrollbar variant ignores size caps;
     // restore the bar if the host fixes those bounds.
-    const info = v_flex().id("info").min_w(0).min_h(0).overflow_y_scroll().children(c ? [this.askBar(c, t, dim), this.info(c, t, dim, mono)] : [skeletonInfo(fg)]);
-    const files = div().min_w(0).min_h(0).child(c ? this.files(c, t, dim) : skeletonFiles(fg));
+    // The host's title and actions (the drawer's Commit, Detach, ×) sit in these headers: actions beside Path / Tree
+    // when the files are on the right, beside Ask when they are below. this.headed tells the host they were placed.
+    this.headed = !!(title || actions);
+    const topActs = wide ? null : actions, fileActs = wide ? actions : null;
+    const info = v_flex().id("info").min_w(0).min_h(0).overflow_y_scroll()
+      .children(c ? [this.askBar(c, t, dim, { title, actions: topActs }), this.info(c, t, dim, mono)] : [this.head(t, dim, title, [topActs]), skeletonInfo(fg)]);
+    const files = div().min_w(0).min_h(0).child(c ? this.files(c, t, dim, fileActs)
+      : v_flex().size_full().child(fileActs ? this.head(t, dim, null, [fileActs]) : div()).child(skeletonFiles(fg)));
     const len = s ? (wide ? s.width : s.height) : 0, a = Math.max(0, Math.round(len * this.split[wide ? "wide" : "tall"] - DIV / 2));
     const divider = div().id("split").flex_none().flex().items_center().justify_center()
       .when(wide, (e) => e.w(DIV).h_full().cursor_col_resize()).when(!wide, (e) => e.h(DIV).w_full().cursor_row_resize())

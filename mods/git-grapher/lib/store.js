@@ -9,7 +9,7 @@
 //   s.state                         { gen, basis, root, sig, history, worktrees, head, states, stashes, wip, pending, error }
 import { READ, createGgit, parseHeader } from "./core.js";
 import { parseLog, LOG_ARGS, orphanTips, ORPHAN_REFLOG } from "./parse-log.js";
-import { wipLists } from "./detail.js";
+import { wipLists, untrackedFiles } from "./detail.js";
 
 export const US = "\x1f";
 export const LOG_LIMIT = 10_000, LOG_MORE = 1_000; // Load 10,000 commits initially; Load more adds 1,000.
@@ -102,7 +102,7 @@ export function createStore(adapter, root, { limit: first = LOG_LIMIT, more: ste
       read(["ls-files", "--others", "--exclude-standard", "-z"], path),
     ]);
     if (cached.code !== 0 || worktree.code !== 0) return null;
-    const untracked = others.stdout.split("\0").filter(Boolean).map((p) => ({ path: p, status: "A", add: 0, del: 0, binary: false, untracked: true }));
+    const untracked = await untrackedFiles((args) => read(args, path), others.stdout);
     return wipLists(cached.stdout, worktree.stdout, untracked); // one conflict row per unmerged file (lib/detail.js)
   }
 

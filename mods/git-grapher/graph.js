@@ -364,26 +364,29 @@ export class GraphView {
       .child(bottom ? div().h(1).w_full().bg(this.drag?.drawer ? t.accent ?? line : line) : div().w(1).h_full().bg(this.drag?.drawer ? t.accent ?? line : line))
       .on_mouse_down("left", (e, cx) => { this.drag = { drawer: side, p0: bottom ? e.position.y : e.position.x, f0: f }; cx.stop_propagation(); cx.notify(); });
     const w = s ? (bottom ? s.width : full) : 0, h = s ? (bottom ? full : s.height) : 0;
-    const bar = h_flex().h(BAR_H).flex_none().px(8).gap(4).items_center().text_size(12).text_color(dim)
-      .child(div().flex_1().child("Commit"))
+    const acts = h_flex().gap(2).items_center().text_size(12).text_color(dim)
       .child(btn("detach", "⇱ Detach", (_e, cx) => this.detach(side, cx)))
       .child(btn("drawer-close", "×", (_e, cx) => this.select(null, cx)));
     // The axis that doesn't slide fills the drawer (w_full / h_full): the root's measured size can lag the pane
     // (seen: ~100px gap on the right of a bottom drawer). Only the sliding axis is a number. The detail gets the
     // content box's own measured size, falling back to the estimate before the first layout.
     const m = this.dsize?.[side];
-    const inner = { width: Math.max(0, (bottom ? m?.width ?? w : w) - (bottom ? 0 : EDGE)), height: Math.max(0, (bottom ? h : m?.height ?? h) - BAR_H - (bottom ? EDGE : 0)) };
+    const inner = { width: Math.max(0, (bottom ? m?.width ?? w : w) - (bottom ? 0 : EDGE)), height: Math.max(0, (bottom ? h : m?.height ?? h) - (this.dv.headed ? 0 : BAR_H) - (bottom ? EDGE : 0)) };
+    // A commit puts "Commit", Detach and × in its own headers; a WIP list, a diff or a message gets the bar above.
+    // ponytail: the height uses the last frame's headed, one frame late (26 px of split) when that changes.
+    const body = this.dv.render(sel ?? this.last, { size: inner, wide: bottom, t, cx, title: "Commit", actions: acts,
+      // Accept a file only when the drawer's loaded commit matches the graph selection; stale row clicks must not
+      // publish a file under another commit or an empty selection.
+      file, onFile: (f) => { if (this.sel && this.dv.sel?.sha === this.sel) this.write(f ? { path: f.path, ...(f.old ? { old: f.old } : {}) } : null); },
+      onBranch: (at, cx) => this.hd.openBranch(cx, at),
+      onHistory: (path, cx, at) => this.openHistory(path, cx, at),
+      store: this.st });
+    const bar = this.dv.headed ? null : h_flex().h(BAR_H).flex_none().px(8).gap(4).items_center().text_size(12).text_color(dim)
+      .child(div().flex_1().child("Commit")).child(acts);
     const content = div().id("drawer-content-" + side).absolute().top(0).left(0).when(bottom, (e) => e.w_full().h(h)).when(!bottom, (e) => e.h_full().w(w)).flex()
       .on_size_change((sz, cx) => { this.dsize = { ...this.dsize, [side]: sz }; cx.notify(); }).when(bottom, (e) => e.flex_col()).when(!bottom, (e) => e.flex_row())
       .child(edge)
-      .child(v_flex().flex_1().min_w(0).min_h(0).child(bar)
-        .child(div().flex_1().min_h(0).child(this.dv.render(sel ?? this.last, { size: inner, wide: bottom, t, cx,
-          // Accept a file only when the drawer's loaded commit matches the graph selection; stale row clicks must not
-          // publish a file under another commit or an empty selection.
-          file, onFile: (f) => { if (this.sel && this.dv.sel?.sha === this.sel) this.write(f ? { path: f.path, ...(f.old ? { old: f.old } : {}) } : null); },
-          onBranch: (at, cx) => this.hd.openBranch(cx, at),
-          onHistory: (path, cx, at) => this.openHistory(path, cx, at),
-          store: this.st }))));
+      .child(v_flex().flex_1().min_w(0).min_h(0).children(bar ? [bar] : []).child(div().flex_1().min_h(0).child(body)));
     // ponytail: no spring while the edge is dragged, so the drawer follows the pointer 1:1.
     return div().id("drawer-" + side).relative().flex_none().overflow_hidden()
       .when(bottom, (e) => e.w_full().h(len)).when(!bottom, (e) => e.h_full().w(len))

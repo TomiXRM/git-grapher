@@ -4,7 +4,7 @@ import { parseMeta, splitBody, parseDiffTree, summary, bar, buildTree, treeRows,
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as F from "./fx.js";
-import { HISTORY_ARGS, HISTORY_NUMSTAT, parseHistory, parseNumstat, wipLists } from "../mods/git-grapher/lib/detail.js";
+import { HISTORY_ARGS, HISTORY_NUMSTAT, parseHistory, parseNumstat, wipLists, untrackedFiles } from "../mods/git-grapher/lib/detail.js";
 
 const US = "\x1f";
 
@@ -147,4 +147,13 @@ test("File History: unique merge resolution → merge OID and numstat included",
   const result = wipLists(cached, work, [{ path: "untracked", status: "?", untracked: true }]);
   assert.deepEqual(result.staged.map(f => [f.old, f.path, f.status]), [["old", "new", "R"]]);
   assert.deepEqual(result.unstaged.map(f => [f.path, f.status]), [["new", "M"], ["untracked", "?"]]);
+});
+
+test("untrackedFiles: real line counts for new files, binary marked, past the cap left at 0", async () => {
+  const d = F.repo(); F.put(d, "two.txt", "a\nb\n"); writeFileSync(join(d, "b.bin"), Buffer.from([0, 1, 2]));
+  const read = (args) => F.attempt(d, ...args);
+  const others = F.raw(d, "ls-files", "--others", "--exclude-standard", "-z");
+  const by = Object.fromEntries((await untrackedFiles(read, others)).map((f) => [f.path, f]));
+  assert.deepEqual([by["two.txt"].add, by["two.txt"].del, by["two.txt"].binary, by["b.bin"].binary], [2, 0, false, true]);
+  assert.equal((await untrackedFiles(read, others, 0)).every((f) => f.add === 0 && f.untracked && f.status === "A"), true);
 });
