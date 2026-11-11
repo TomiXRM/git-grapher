@@ -223,15 +223,23 @@ export class CommitPane {
       const actions = (f) => f.conflict
         ? div().flex_none().h(20).px(7).flex().items_center().rounded(5).border_1().border_color(red).text_size(11).text_color(red).child("Conflict")
         : u ? h_flex().gap(4).flex_none().child(pill(`dis-${f.path}`, "Discard", red, (cx) => discardAsk([f], cx)))
-          .child(pill(`stg-${f.path}`, "Stage", green, (cx) => this.op("stage", (g, tt) => g.stage(tt, [f.path, ...(f.old ? [f.old] : [])]), cx, null, this.moveStage([f.path]))))
-        : pill(`ust-${f.path}`, "Unstage", orange, (cx) => this.op("unstage", (g, tt) => g.unstage(tt, [f.path, ...(f.old ? [f.old] : [])]), cx, null, this.moveUnstage([f.path])));
+          .child(pill(`stg-${f.path}`, "Stage", green, (cx) => move([f], cx)))
+        : pill(`ust-${f.path}`, "Unstage", orange, (cx) => move([f], cx));
+      // Stage / Unstage a set of files (a row, or every file under a folder); a rename takes its old path along.
+      const move = (fs, cx) => { const ps = fs.flatMap((f) => [f.path, ...(f.old ? [f.old] : [])]), shown = fs.map((f) => f.path);
+        if (u) this.op("stage", (g, tt) => g.stage(tt, ps), cx, null, this.moveStage(shown));
+        else this.op("unstage", (g, tt) => g.unstage(tt, ps), cx, null, this.moveUnstage(shown)); };
+      // A folder row stages the files under it, leaving conflicts out (as Stage all does).
+      const under = (d) => files.filter((f) => f.path.startsWith(d.path) && !f.conflict);
       // A ghost keeps its row's id: the same element, so its opacity animates from where it was.
       const draw = (it, ghost = false) => it.file ? row(it.file, it.depth, it.name, k, ghost ? null : actions(it.file))
         : h_flex().id(`${k}-dir-${it.dir.path}`).h(ROW_H).flex_none().pl(8 + it.dir.depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer()
           .hover((s) => s.bg(t.hover ?? alpha(fg, "10")))
           .on_click((_e, cx) => { const was = this.snapshot(); if (it.dir.open) this.closed[k].add(it.dir.path); else this.closed[k].delete(it.dir.path); this.splice(was, cx); cx.notify(); })
           .child(FILES_ICON(it.dir.open ? "chevron-down" : "chevron-right").size(12).flex_none().text_color(dim))
-          .child(div().flex_1().min_w(0).truncate().text_color(dim).child(it.dir.name));
+          .child(div().flex_1().min_w(0).truncate().text_color(dim).child(it.dir.name))
+          .children(ghost ? [] : [(() => { const fs = under(it.dir);
+            return pill(`${k}-dir-mv-${it.dir.path}`, u ? "Stage" : "Unstage", u ? green : orange, (cx) => move(fs, cx), fs.length > 0); })()]);
       const list = this.items(k, files), tr = { duration: MOTION_MS, easing: "ease-out" };
       // Every row absolute at its slot (4 = the list's padding); a spacer gives the scroll its height.
       const place = (el, slot, op) => el.absolute().left(4).right(4).top(4 + slot * ROW_H).opacity(op).transition("top", tr).transition("opacity", tr);
