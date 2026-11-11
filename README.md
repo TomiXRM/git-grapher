@@ -2,6 +2,14 @@
 
 # Git Grapher
 
+[![Release](https://img.shields.io/github/v/release/TomiXRM/git-grapher)](https://github.com/TomiXRM/git-grapher/releases)
+[![Stars](https://img.shields.io/github/stars/TomiXRM/git-grapher?style=flat)](https://github.com/TomiXRM/git-grapher/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/TomiXRM/git-grapher/total)](https://github.com/TomiXRM/git-grapher/releases)
+[![License](https://img.shields.io/github/license/TomiXRM/git-grapher)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
+[![Herdr mod](https://img.shields.io/badge/Herdr-mod-f5b81c)](https://herdr.dev/mods)
+[![CI](https://github.com/TomiXRM/git-grapher/actions/workflows/release.yml/badge.svg)](https://github.com/TomiXRM/git-grapher/actions/workflows/release.yml)
+
 A git client for [Herdr](https://herdr.dev): the commit graph, diffs and common git operations in a tab or pane. It runs your `git`; nothing is kept outside the repository.
 
 Requires Herdr and git. Tested with Herdr 0.1.14 on macOS.
