@@ -872,7 +872,8 @@ const dashes = dashTo(c);
         .child(sideRail(this, t))
         .child(div().relative().flex_1().min_w(0).min_h(0)
           .child(file || this.hist ? graph.invisible() : graph)
-          .when(Boolean(this.hist), (e) => e.child(div().absolute().inset_0().child(this.histView(t, cx))))
+          // A file opened over File History hides it: both diffs share dv's one diff slot (ext) and would take it in turns.
+          .when(Boolean(this.hist) && !file, (e) => e.child(div().absolute().inset_0().child(this.histView(t, cx))))
           .when(Boolean(file), (e) => e.child(div().absolute().inset_0().bg(t.background)
             .on_mouse_down("left", () => this.focus.focus()) // the graph's keys (Esc, ⌘C for picked rows) serve the diff
             .child(this.dv.fileDiff(file, { t, cx, onBack: (cx) => { this.write(null); this.focus.focus(); cx.notify(); } }))))

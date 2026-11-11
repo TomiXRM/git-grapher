@@ -255,7 +255,24 @@ export class DetailView {
       body: [], trailers: [], refs: [], files, tree: buildTree(files), git };
   }
 
-  async patch(c, f) {
+  // The helper colours the diff (≈0.5 s for a 20k-line file: it highlights from the top for context); plain git diff
+  // takes ~10 ms. fill() shows the plain rows first and swaps in the coloured ones when they arrive.
+  helped(c, f) { return !previewable(f.path) && !f.binary && !this.sel?.machine && !(c.wip && f.untracked); }
+  async fill(c, f, d, cx, alive) {
+    const err = (e) => ({ note: String(e?.message ?? e) });
+    let done = false;
+    const full = this.patch(c, f).catch(err).finally(() => { done = true; });
+    if (this.helped(c, f)) {
+      const p = await this.patch(c, f, true).catch(() => null);
+      if (p && !done && alive()) { Object.assign(d, p); cx.notify(); }
+    }
+    const r = await full;
+    for (const k of ["rows", "cols", "note"]) delete d[k];
+    Object.assign(d, r);
+    if (alive()) { cx.notify(); await morePages(d, cx, alive); }
+  }
+
+  async patch(c, f, plain = false) {
     // Pictures (and PDF / heic through the helper): before | after instead of a text diff, even when git calls the file text.
     if (previewable(f.path)) {
       const sel = this.sel ?? {}, cwd = c.wip ? c.path : sel.repo, on = sel.machine ?? null, gone = f.status === "D", added = f.status === "A" || f.untracked;
@@ -268,7 +285,7 @@ export class DetailView {
     // Coloured by the helper when it can; a plain git diff otherwise (no helper, another machine, untracked).
     const paths = ["--", ...(f.old ? [f.old, f.path] : [f.path])], sel = this.sel ?? {};
     const range = c.cmp ? [c.base, c.head] : c.wip ? (f.untracked ? null : [c.base ?? "HEAD"]) : [c.parents[0] ?? EMPTY_TREE, c.sha];
-    if (range && !sel.machine) { const d = await colouredDiff(c.wip ? c.path : sel.repo, [...range, ...paths]); if (d) return d; }
+    if (range && !sel.machine && !plain) { const d = await colouredDiff(c.wip ? c.path : sel.repo, [...range, ...paths]); if (d) return d; }
     if (c.cmp) return parseDiff(await c.git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M", c.base, c.head, "--", ...(f.old ? [f.old, f.path] : [f.path])]));
     if (c.wip) { // exit 1 = "there are differences" for --no-index
       const args = f.untracked ? ["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", f.path]
@@ -283,13 +300,10 @@ export class DetailView {
   fileDiff(path, { t, cx, onBack }) {
     const c = this.c, dim = t.muted ?? alpha(t.foreground, "99"), mono = settings().font_family ?? "Menlo";
     const f = c?.files.find((x) => x.path === path);
-    if (!f) return this.diffView({ file: { path, status: "" }, note: c ? `Not changed in ${c.sha.slice(0, 8)}` : "Loading…" }, t, dim, mono, onBack);
+    if (!f) return this.diffView({ file: { path, status: "" }, ...(c ? { note: `Not changed in ${c.sha.slice(0, 8)}` } : {}) }, t, dim, mono, onBack);
     if (this.ext?.file !== f) { // f is per loaded commit, so a new commit reloads too
       const d = (this.ext = { file: f });
-      cx.spawn(async (cx) => {
-        Object.assign(d, await this.patch(c, f).catch((e) => ({ note: String(e?.message ?? e) })));
-        if (this.ext === d) { cx.notify(); await morePages(d, cx, () => this.ext === d); }
-      });
+      cx.spawn(async (cx) => this.fill(c, f, d, cx, () => this.ext === d));
     }
     return this.diffView(this.ext, t, dim, mono, onBack);
   }
@@ -308,10 +322,7 @@ export class DetailView {
   openDiff(f, cx) {
     const c = this.c, d = { file: f };
     this.diff = d; this.handle.focus(); cx.notify();
-    cx.spawn(async (cx) => {
-      Object.assign(d, await this.patch(c, f).catch((e) => ({ note: String(e?.message ?? e) })));
-      if (this.diff === d) { cx.notify(); await morePages(d, cx, () => this.diff === d); }
-    });
+    cx.spawn(async (cx) => this.fill(c, f, d, cx, () => this.diff === d));
   }
 
   diffView(d, t, dim, mono, back = (cx) => { this.diff = null; cx.notify(); }) { // back null: no Back button
@@ -368,7 +379,7 @@ export class DetailView {
     const body = d.preview
       ? h_flex().flex_1().min_h(0).child(pic("Before", d.preview.before)).child(pic("After", d.preview.after))
       : !d.rows
-      ? div().p(12).text_size(12).text_color(dim).whitespace_normal().child(d.note ?? "Loading diff…")
+      ? (d.note ? div().p(12).text_size(12).text_color(dim).whitespace_normal().child(d.note) : skeletonDiff(t.foreground))
       : (() => {
         const last = d.rows.reduce((n, r) => Math.max(n, r.old ?? 0, r.new ?? 0), 0);
         const numW = String(last).length * CHAR_W + 10, width = Math.ceil(2 * numW + 14 + 12 + 16 + d.cols * CHAR_W);

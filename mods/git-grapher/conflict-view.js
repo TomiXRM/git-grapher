@@ -12,6 +12,7 @@ import { settings, theme as herdrTheme } from "herdr";
 import * as C from "./lib/conflict.js";
 import { askPicker, sendAsk } from "./ask.js";
 import { appleCheck } from "./ui/check.js";
+import { skeletonDiff } from "./detail-view.js";
 
 const alpha = (c, a) => (c && c.length === 7 ? c + a : c);
 const MONO = () => settings().font_family ?? "Menlo";
@@ -225,7 +226,7 @@ export class ConflictView {
         .child(div().p(12).text_size(12).text_color(dim).whitespace_normal().child("Saved: its result is staged. To change it, edit the file and stage it again."));
     }
     const d = this.drafts.get(f.path);
-    if (!d || d.loading) return v_flex().size_full().child(head([])).child(div().p(12).text_color(dim).child("Loading…"));
+    if (!d || d.loading) return v_flex().size_full().child(head([])).child(skeletonDiff(fg));
     if (d.f.error) return v_flex().size_full().child(head([])).child(div().p(12).text_color(red).child(d.f.error));
     if (!d.f.segs && d.f.kind === "binary" && previewable(f.path)) return this.pictures(f, d, t, o, head);
     if (!d.f.segs) { // one side whole
@@ -291,7 +292,8 @@ export class ConflictView {
         .child(h_flex().flex_none().h(28).px(8).gap(7).items_center().text_size(11).bg(alpha(col, "26"))
           .child(appleCheck(t, pick === key)).child(div().min_w(0).truncate().font_semibold().text_color(col).child(label)))
         .child(div().flex_1().min_h(0).p(10).flex().items_center().justify_center()
-          .child(p?.file ? image(p.file).size_full() : div().text_size(12).text_color(o.dim).child(p?.note ?? "Loading…")));
+          .child(p?.file ? image(p.file).size_full() : p?.note ? div().text_size(12).text_color(o.dim).child(p.note)
+            : div().size_full().rounded(6).bg(alpha(t.foreground, "14")))); // loading
     };
     const save = o.btn("cf-save", "Save", (cx) => this.take(f, pick, cx), { primary: true, disabled: !pick });
     return v_flex().size_full().min_h(0)

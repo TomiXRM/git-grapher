@@ -459,7 +459,7 @@ export class Header {
 
     // Repo block: Fetch (the refresh icon, spins while fetching) + name + branch → upstream ↑ ↓.
     // The names truncate; ↑n ↓m never do (they are the point of the line at any width).
-    const sub = !h ? (this.err ?? "Loading…")
+    const sub = !h ? (this.err ?? div().mt(2).h(8).w(110).rounded(4).bg(alpha(fg, "26"))) // loading: a skeleton bar
       : !h.branch ? `detached HEAD ${h.oid?.slice(0, 7) ?? ""}`
       : !h.upstream ? `${h.branch} · no upstream`
       : `${h.branch} → ${h.upstream}`;
