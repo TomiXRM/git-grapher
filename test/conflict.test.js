@@ -488,14 +488,6 @@ for (const action of ["skip", "abort"]) test(`${action}Op: unrelated edit during
   const r = await F.refused(d, () => C[action + "Op"](ad, d, c)); assert.equal(r.reason, "edits"); assert.match(r.stderr, /other/);
 });
 
-// known non-cooperating editor window inside SAVE's check/write script
- test("saveFile: edit after final hash before write → external bytes preserved", { todo: "Closing the final check/write window needs a broader concurrency design; no rollback guarantee today" }, async () => {
-  const d = F.conflict(), c = await C.readConflict(ad, d), f = await C.loadFile(ad, d, c.files[0]);
-  const race = F.inside(d, "hash-object", ["restore", "--source=topic", "--worktree", "--", "f"], { after: true });
-  const r = await C.saveFile(race.ad, d, { rev: c.rev, path: "f", text: "chosen\n", workId: f.workId }); F.fired(race);
-  assert.equal(fs.readFileSync(join(d, "f"), "utf8"), "incoming\n"); assert.equal(r.outcome, "refused");
-});
-
 // Report partial Take when the index changes or the file is removed before checkout fails.
 test("takeSide: incoming blob unavailable during checkout → unknown with exact partial state", async () => {
   const d = F.conflict(), c = await C.readConflict(ad, d), loaded = await C.loadFile(ad, d, c.files[0]);

@@ -37,8 +37,10 @@ fired once and succeeded. Nothing relies on sleeps.
 
 ## Known gaps
 
-- **Save's last window** (a `todo` test, reported separately by node, not counted as a pass). A writer that changes the
-  file after Save's final hash and before its write is overwritten (`tla/ConflictSave.tla`, KeepsAllEdits). Closing it needs file locking that `sh` does not offer.
+- **Save's last window.** A writer that changes the file after Save's final hash and before its write is overwritten
+  (`tla/ConflictSave.tla`, KeepsAllEdits; the trace test "an edit right after the compare is overwritten" shows it
+  with real git). POSIX has no compare-and-write on file contents, so it cannot be closed, only narrowed; editors and
+  `git checkout` have the same window.
 - **A change while no copy is watching.** Between a watch batch and the next `watchFolder` call nothing listens. If
   Herdr does not keep such a change (not measured), a worktree-only change in that gap shows at the next poll, 45 s by
   default (`tla/RefreshCopies.tla`).
