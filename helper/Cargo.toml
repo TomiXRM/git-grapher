@@ -1,6 +1,6 @@
 [package]
 name = "ggit-helper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "ggit's helper binary (DESIGN.md): preview (PDF via hayro, heic via heic-rs → PNG; ggit-helper-lab r2) and diff colours (syntect; r3)."
