@@ -521,11 +521,30 @@ fn row_spans(eng: &mut Eng, id: usize, rows: &[Row], blobs: [Option<&[u8]>; 2], 
         if let Some(b) = blobs[si] {
             let fl = file_lines(b);
             let ln = |r: &Row| (if old { r.o } else { r.n }) as usize;
-            // syntect streams, so it can stop after the last needed line; tree-sitter must see the whole file
-            // (cut at the change, an open /* or """ never closes and error recovery drops the comment/string).
+            // syntect streams, so it starts CTX lines above each hunk (merged when they touch) and stops at its end:
+            // the cost follows the hunks, not the file (a 22k-line file: 550 ms from the top). delta starts at each
+            // hunk with no context at all. tree-sitter must see the whole file (cut at the change, an open /* or """
+            // never closes and error recovery drops the comment/string).
+            // ponytail: a comment or string opened more than CTX lines above a hunk is missed there, as in delta.
+            const CTX: usize = 300;
             let need = hs.iter().flatten().map(|&i| ln(&rows[i])).max().unwrap_or(0).min(fl.len());
-            let max = if eng.streams() { need } else { fl.len() };
-            let sp = eng.hl(id, &fl[..max].iter().map(|l| cut(l, cut_at)).collect::<Vec<_>>());
+            let mut win: Vec<(usize, usize)> = Vec::new(); // 0-based [lo, hi)
+            if eng.streams() {
+                for h in &hs {
+                    let ns = h.iter().map(|&i| ln(&rows[i])).filter(|&n| n >= 1 && n <= need);
+                    let (lo, hi) = ns.fold((usize::MAX, 0), |(a, b), n| (a.min(n - 1), b.max(n)));
+                    if lo == usize::MAX { continue }
+                    let lo = lo.saturating_sub(CTX);
+                    match win.last_mut() { Some(w) if lo <= w.1 => w.1 = w.1.max(hi), _ => win.push((lo, hi)) }
+                }
+            } else {
+                win.push((0, fl.len()));
+            }
+            let mut sp = vec![Spans::new(); fl.len()];
+            for &(lo, hi) in &win {
+                let part = eng.hl(id, &fl[lo..hi].iter().map(|l| cut(l, cut_at)).collect::<Vec<_>>());
+                for (j, s) in part.into_iter().enumerate() { sp[lo + j] = s }
+            }
             st.file_ctx += 1;
             for &i in hs.iter().flatten() {
                 let n = ln(&rows[i]);
