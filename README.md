@@ -120,7 +120,7 @@ Don't reinstall with your agent to update: Herdr never overwrites a mod, so you'
 
 ## Notes
 
-- Reads the newest 10,000 commits; **Load more commits** adds 1,000.
+- Reads the newest 2,000 commits; **Load more commits** adds 1,000.
 - All Herdr mods share one JS heap. On a very large repository, close copies you don't use.
 
 ## Development

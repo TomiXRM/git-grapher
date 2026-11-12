@@ -9,7 +9,9 @@ import { watchFolder, shared, setShared } from "herdr";
 const QUIET = 300, MOST = 1000; // read 300 ms after the last batch, but at least once a second during a flood
 const POLL = { local: 45_000, remote: 10_000 };
 // our own reads use READ flags and make no events; these are git's own bookkeeping, never a change we show.
-const NOISE = /(\.lock$|\/objects\/|\/logs\/|COMMIT_EDITMSG$|AUTO_MERGE$|\/FETCH_HEAD$)/;
+// .git/lfs/: git-lfs writes .git/lfs/tmp files while our status / diff run its filter on a modified LFS file, so
+// counting them made every read start the next one.
+const NOISE = /(\.lock$|\/objects\/|\/logs\/|\/\.git\/lfs\/|COMMIT_EDITMSG$|AUTO_MERGE$|\/FETCH_HEAD$)/;
 export const relevant = (batch, root) => batch.some((p) => p === root || !NOISE.test(p));
 
 export function drive(store, { machine = null, pollMs = null } = {}, cx) {

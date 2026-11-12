@@ -12,7 +12,10 @@ import { parseLog, LOG_ARGS, orphanTips, ORPHAN_REFLOG } from "./parse-log.js";
 import { wipLists, untrackedFiles } from "./detail.js";
 
 export const US = "\x1f";
-export const LOG_LIMIT = 10_000, LOG_MORE = 1_000; // Load 10,000 commits initially; Load more adds 1,000.
+// Load 2,000 commits initially; Load more adds 1,000. Every mod shares one ~47 MB JS heap and each Git Grapher copy holds
+// its own history (10,000 commits of a real repository: ~18 MB), so three tabs on a big repository used to fill it, and
+// a read whose result could not be stored never came back (the whole view stayed "loading…").
+export const LOG_LIMIT = 2_000, LOG_MORE = 1_000;
 export const MAX_GIT = 12; // Limit concurrency: Herdr fails execs above roughly 49 simultaneous calls, shared by all mods.
 const FORMAT = "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s";
 // --ignore-missing allows an unborn HEAD without hiding other fetched history.

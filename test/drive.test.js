@@ -52,3 +52,9 @@ test("drive: second bump has same timestamp and new ID → one refresh", async t
   await h.advance(550); assert.deepEqual(h.events, { stamps: 0, refreshes: 1 });
   await h.advance(500); assert.equal(h.events.refreshes, 1);
 });
+
+test("relevant: git-lfs's .git/lfs/tmp files from our own reads are not a change", () => {
+  const relevant = loadView("drive.js", "relevant");
+  assert.equal(relevant(["/r/.git/lfs/tmp/123"], "/r"), false);
+  assert.equal(relevant(["/r/.git/lfs/tmp/123", "/r/a.txt"], "/r"), true);
+});
