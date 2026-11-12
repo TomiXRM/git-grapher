@@ -41,10 +41,18 @@ export async function previewSide(src, { cwd, on = null }) {
       : await gitRun("sh", ["-c", 'git --no-optional-locks cat-file --filters "$1" > "$2.part.$$" && mv -- "$2.part.$$" "$2"', "sh", spec, abs(raw)], { cwd });
     if (r.code !== 0) return { note: (r.stderr || "Could not copy the file").split("\n")[0] };
   }
-  if (SHOWN.test(path)) return { file: raw };
+  if (SHOWN.test(path)) return { file: raw, ...(await dims(raw)) };
   // Convert PDF / HEIC to PNG with the helper: PDF page 1 at 1920 px wide, HEIC at most 2048 px.
   // Content-derived filenames accompany { path, width, height, pages } output.
   return { ...(await convert(raw, 1)), raw };
+}
+
+// An image's pixel size from file(1), so a tall one can be fit to the width and scrolled: { w, h } | {} (svg, unknown).
+// The size is the last "W x H" (JPEG lists its density first).
+// ponytail: EXIF rotation is not read; a rotated phone photo gets its stored ratio.
+async function dims(raw) {
+  const r = await exec("file", ["-b", abs(raw)]).catch(() => null), m = [...(r?.stdout ?? "").matchAll(/(\d+) ?x ?(\d+)/g)].at(-1);
+  return m && +m[1] > 0 && +m[2] > 0 ? { w: +m[1], h: +m[2] } : {};
 }
 
 // Page n (1-based) of a PDF already copied by previewSide (its `raw`): one helper call per page, 13–15 ms at 2048 px.

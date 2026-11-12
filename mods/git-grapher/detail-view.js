@@ -105,6 +105,8 @@ export class DetailView {
     this.cp = new CommitPane(); // the WIP row's commit pane (commit.js); its fields survive row changes
     this.diffWrap = opt.diffWrap ?? load("diff-wrap", false); // long lines wrap instead of scrolling sideways (kept)
     this.diffMode = opt.diffMode ?? load("diff-mode", "unified"); // "unified" | "split" (the choice is kept; opt: screenshots)
+    // Pictures: "split" (Before | After) or "swap" (one at a time, flipped with Before / After, same place and scale).
+    this.picMode = load("pic-mode", "split"); this.picSide = "After";
     this.ask = null; // { key, target: agent address | "new", sent? } while the Ask box is open
     this.askBox = TextareaState.new({ placeholder: "Ask the AI about this…", rows: 3 });
   }
@@ -327,6 +329,7 @@ export class DetailView {
 
   diffView(d, t, dim, mono, back = (cx) => { this.diff = null; cx.notify(); }) { // back null: no Back button
     const f = d.file, sc = { A: t.ansi2, D: t.ansi1, R: t.ansi4, C: t.ansi4 }[f.status] ?? t.ansi3;
+    const both = Boolean(d.preview?.before && d.preview?.after), swap = both && this.picMode === "swap";
     const head = h_flex().h(36).flex_none().px(10).gap(8).items_center().border_b(1).border_color(alpha(t.foreground, "1f")).text_size(13)
       // No Back when the host has its own (File History's header): back = null.
       .children(back ? [div().id("diff-back").h(22).px(8).flex_none().flex().items_center().rounded(5).cursor_pointer().text_size(12)
@@ -347,20 +350,29 @@ export class DetailView {
       .when(Boolean(d.rows), (e) => e.child(segmented({ id: "diff-mode", t, w: 64, value: this.diffMode,
         options: [{ value: "unified", label: "Unified" }, { value: "split", label: "Split" }],
         onChange: (v, cx) => { this.diffMode = v; save("diff-mode", v); cx.notify(); } })))
-      .when(d.preview?.before?.pages > 1 && d.preview?.after?.pages > 1, (e) => e.child(div().id("sync-scroll").h(22).px(8).flex_none().flex().items_center()
+      .when(both, (e) => e.child(segmented({ id: "pic-mode", t, w: 56, value: this.picMode,
+        options: [{ value: "split", label: "Split" }, { value: "swap", label: "Swap" }],
+        onChange: (v, cx) => { this.picMode = v; save("pic-mode", v); cx.notify(); } })))
+      .when(swap, (e) => e.child(segmented({ id: "pic-side", t, w: 56, value: this.picSide,
+        options: [{ value: "Before", label: "Before" }, { value: "After", label: "After" }],
+        onChange: (v, cx) => { this.picSide = v; cx.notify(); } })))
+      .when(!swap && d.preview?.before?.pages > 1 && d.preview?.after?.pages > 1, (e) => e.child(div().id("sync-scroll").h(22).px(8).flex_none().flex().items_center()
         .rounded(5).cursor_pointer().text_size(12).border_1().border_color(t.input ?? t.border)
         .bg(this.pv?.d === d && !this.pv.sync ? t.raised : alpha(t.accent ?? t.foreground, "33")).hover((h) => h.bg(t.hover ?? t.raised))
         .on_click((_e, cx) => { if (this.pv?.d === d) { this.pv.sync = !this.pv.sync; cx.notify(); } })
         .child(this.pv?.d === d && !this.pv.sync ? "Sync scroll: off" : "Sync scroll: on")));
     const note = (q) => div().text_size(12).text_color(dim).whitespace_normal().child(q ? q.note : "None");
-    // A PDF of several pages: its pages one under another. The column is ours, not overflow_scroll, so
+    // A page of known size (PDF, heic, an image file(1) could size): fit to the column's width and scroll when it is taller. Several pages: one under another. The column is ours, not overflow_scroll, so
     // the two sides can scroll together ("Sync scroll", on by default): the wheel moves an offset per side, clamped.
     // Each page's height = the column's width × its ratio (an image keeps no ratio of its own: pages had gaps between).
     const pv = this.pv?.d === d ? this.pv : (this.pv = { d, y: {}, w: {}, h: {}, sync: this.pv?.sync ?? true });
-    const GAP = 8, tall = (p, k) => (p.list ?? [p]).reduce((n, q) => n + (q.w ? (pv.w[k] ?? 0) * q.h / q.w : 40) + GAP, -GAP);
+    // A page is the column's width, but never larger than its own pixels (a small icon is not blown up), centred.
+    const fw = (q, k) => Math.min(pv.w[k] ?? 0, q.w * (pv.unit ?? 1));
+    const GAP = 8, tall = (p, k) => (p.list ?? [p]).reduce((n, q) => n + (q.w ? fw(q, k) * q.h / q.w : 40) + GAP, -GAP);
     const scrollBy = (k, dy) => {
-      const sides = pv.sync ? ["Before", "After"] : [k], all = { Before: d.preview?.before, After: d.preview?.after };
-      for (const s of sides) if (all[s]?.pages > 1) pv.y[s] = Math.max(0, Math.min(tall(all[s], s) - (pv.h[s] ?? 0), (pv.y[s] ?? 0) - dy));
+      const all = { Before: d.preview?.before, After: d.preview?.after, Swap: this.picSide === "Before" ? d.preview?.before : d.preview?.after };
+      const sides = k === "Swap" || !pv.sync ? [k] : ["Before", "After"];
+      for (const s of sides) if (all[s]?.w) pv.y[s] = Math.max(0, Math.min(tall(all[s], s) - (pv.h[s] ?? 0), (pv.y[s] ?? 0) - dy));
     };
     // on_size_change reports zoomed pixels. Measure a 100-unit reference, keep dimensions in measured pixels,
     // and divide by that scale when setting sizes.
@@ -370,14 +382,17 @@ export class DetailView {
       .on_scroll_wheel((e, cx) => { scrollBy(k, e.delta.y); cx.stop_propagation(); cx.notify(); })
       .child(div().id("unit-" + k).absolute().w(100).h(1).invisible()
         .on_size_change((size, cx) => { if (size.width > 0 && pv.unit !== size.width / 100) { pv.unit = size.width / 100; cx.notify(); } }))
-      .child(v_flex().absolute().left(0).w_full().top(-(pv.y[k] ?? 0) / u).gap(GAP / u)
-        .children(pv.w[k] ? (p.list ?? [p]).map((q) => (q.file ? image(q.file).w(pv.w[k] / u).h(pv.w[k] * q.h / q.w / u).flex_none() : note(q))) : []));
-    const pic = (label, p) => v_flex().flex_1().min_w(0).h_full().gap(6).p(10)
+      .child(v_flex().absolute().left(0).w_full().items_center().top(-(pv.y[k] ?? 0) / u).gap(GAP / u)
+        .children(pv.w[k] ? (p.list ?? [p]).map((q) => (q.file && q.w ? image(q.file).w(fw(q, k) / u).h(fw(q, k) * q.h / q.w / u).flex_none() : note(q))) : []));
+    const pic = (label, p, k = label) => v_flex().flex_1().min_w(0).h_full().gap(6).p(10)
       .child(div().flex_none().text_size(12).text_color(dim).child(label + (p?.pages > 1 ? ` · ${p.pages} pages${p.pages > PAGES_MAX ? `, the first ${PAGES_MAX} shown` : ""}` : "")))
       .child(div().flex_1().min_h(0).rounded(6).border_1().border_color(alpha(t.foreground, "1f")).p(8)
-        .child(p?.pages > 1 ? pages(p, label) : p?.file ? image(p.file).size_full() : note(p)));
+        .child(p?.w ? pages(p, k) : p?.file ? image(p.file).size_full() : note(p)));
     const body = d.preview
-      ? h_flex().flex_1().min_h(0).child(pic("Before", d.preview.before)).child(pic("After", d.preview.after))
+      // An added file has no Before and a deleted one no After: only the side that exists, full width.
+      // Swap: one side in the "Swap" column, so both sides share its width and scroll offset and a point stays put.
+      ? h_flex().flex_1().min_h(0).children(swap ? [pic(this.picSide, d.preview[this.picSide === "Before" ? "before" : "after"], "Swap")]
+        : [["Before", d.preview.before], ["After", d.preview.after]].filter(([, p]) => p).map(([k, p]) => pic(k, p)))
       : !d.rows
       ? (d.note ? div().p(12).text_size(12).text_color(dim).whitespace_normal().child(d.note) : skeletonDiff(t.foreground))
       : (() => {
