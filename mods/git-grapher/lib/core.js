@@ -23,6 +23,9 @@ const STATES = [
 
 const lines = (s) => s.split("\n").filter(Boolean);
 
+// Commits given newest first (graph order) → the order git runs them: cherry-pick oldest first, revert newest first.
+export const applyOrder = (operation, newestFirst) => (operation === "cherry-pick" ? [...newestFirst].reverse() : [...newestFirst]);
+
 export function parseVersion(text) {
   const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(text);
   return m ? [+m[1], +m[2], +(m[3] ?? 0)] : null;
@@ -372,17 +375,22 @@ export function createGgit({ run, testPath }) {
   const worktreePrune = (t) => worktreeCmd(t, ["prune"], "wt-prune");
   const worktreeRepair = (t) => worktreeCmd(t, ["repair"], "wt-repair");
 
-  // `revert --no-edit <sha>`. A merge needs a mainline this UI does not ask for, so it is refused before running.
-  const revert = (t, sha) => write("revert", async (sh) => {
-    const cwd = t.root, parents = (await sh([...READ, "rev-list", "--parents", "-n", "1", sha], cwd)).stdout.trim().split(" ").length - 1;
-    if (parents > 1) return { outcome: "refused", reason: "merge-commit" };
+  // `revert --no-edit` / `cherry-pick` over commits given newest first (graph order). Revert undoes children before their
+  // parents; cherry-pick applies parents first (applyOrder). One git command, so a conflict leaves git's sequencer for
+  // Conflict Mode's Continue / Skip / Abort. Merges need a mainline this UI does not ask for: refused before running.
+  const sequence = (operation, args) => (t, newestFirst) => write(operation, async (sh) => {
+    const cwd = t.root, shas = applyOrder(operation, [newestFirst].flat());
+    if ((await sh([...READ, "rev-list", "--no-walk", "--min-parents=2", ...shas], cwd)).stdout.trim()) return { outcome: "refused", reason: "merge-commit" };
     const before = await rev(sh, cwd, "HEAD");
-    const r = await sh(["revert", "--no-edit", sha], cwd);
+    const r = await sh([...args, ...shas], cwd);
     const after = await rev(sh, cwd, "HEAD"), a = await statusOf(sh, cwd);
-    if (a.unmerged) return { outcome: "conflict", unmerged: a.unmerged, stderr: r.stderr.trim() };
+    if (a.unmerged) return { outcome: "conflict", unmerged: a.unmerged, n: shas.length, stderr: r.stderr.trim() };
     if (r.code !== 0) return { outcome: "refused", exitCode: r.code, stderr: r.stderr.trim() };
-    return { outcome: before === after ? "noop" : "completed", head: after };
+    return { outcome: before === after ? "noop" : "completed", n: shas.length, head: after };
   });
+  const revert = sequence("revert", ["revert", "--no-edit"]);
+  // --empty=drop: a commit already on HEAD is skipped instead of stopping the sequence.
+  const cherryPick = sequence("cherry-pick", ["cherry-pick", "--empty=drop"]);
 
   // `switch --detach <sha>`: git refuses when local changes would be overwritten, and then nothing moves.
   const checkoutDetached = (t, sha) => write("checkout", async (sh) => {
@@ -474,7 +482,7 @@ export function createGgit({ run, testPath }) {
 
   return { stage, unstage, discard, commit, lastMessage, templatePath,
     tagCreate, fetchBranch, remoteBranchDelete, setUpstream, syncRemote,
-    version, target, header, inProgress, fetch, stashTop, worktreeAdd, worktreeRemove, worktreeLock, worktreePrune, worktreeRepair, revert, checkoutDetached, switchBranch, stashPush, stashPop, branchCreate, stashApply, stashDrop, branchRename, branchOwn, branchDelete, tagPush, push, pull };
+    version, target, header, inProgress, fetch, stashTop, worktreeAdd, worktreeRemove, worktreeLock, worktreePrune, worktreeRepair, revert, cherryPick, checkoutDetached, switchBranch, stashPush, stashPop, branchCreate, stashApply, stashDrop, branchRename, branchOwn, branchDelete, tagPush, push, pull };
 }
 
 // herdr adapter: pass environment changes through env because options.env is ignored. Remove repository-selecting

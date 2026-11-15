@@ -102,7 +102,7 @@ export class GraphView {
     this.graph = null; this.meta = []; this.refs = new Map(); this.files = new Map();
     this.lanePaths = new LanePathCache(); this.layoutGeneration = 0;
     this.backgroundRedraw = new RedrawGate();
-    this.sel = null; this.repo = null; this.focus = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.histScroll = VirtualListScrollHandle.new();
+    this.sel = null; this.picks = new Set(); this.pickFrom = null; this.repo = null; this.focus = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.histScroll = VirtualListScrollHandle.new();
     // Sidebar state: open list, folded groups and filter (sidebar.js).
     this.side = p.side ?? null; this.sidePinned = Boolean(p.side); this.sideFold = new Set(); this.sideFilter = InputState.new({ placeholder: "Filter" });
     this.sideFilter.on("change", (_e, cx) => cx.notify());
@@ -302,6 +302,23 @@ export class GraphView {
     cx.notify();
   }
   selectNow(sha) { this.sel = sha; this.write(null); } // a new commit (or none) closes the diff
+  // Multi-select for bulk revert / cherry-pick: ⌘-click toggles a commit, ⇧-click picks the commit rows from the anchor
+  // (the last plain or ⌘-clicked row) to here. Plain clicks, ↑ / ↓ and Esc clear it. WIP and stash rows are never picked.
+  pick(sha, { shift }, cx) {
+    const rows = this.graph.rows, plain = (i) => i >= 0 && !this.meta[i].wip && !this.meta[i].stash, at = rows.findIndex((r) => r.commit === sha);
+    if (!plain(at)) return;
+    if (shift) {
+      const from = rows.findIndex((r) => r.commit === (this.pickFrom ?? this.sel)), a = from < 0 ? at : Math.min(from, at), b = Math.max(from, at);
+      this.picks = new Set(rows.slice(a, b + 1).filter((_, k) => plain(a + k)).map((r) => r.commit));
+    } else {
+      if (!this.picks.size && plain(rows.findIndex((r) => r.commit === this.sel))) this.picks.add(this.sel);
+      if (!this.picks.delete(sha)) this.picks.add(sha);
+      this.pickFrom = sha;
+    }
+    this.select(this.picks.has(sha) ? sha : [...this.picks].pop() ?? null, cx); cx.notify();
+  }
+  // Picked commits newest first (graph order), as revert / cherry-pick take them.
+  picked() { return (this.graph?.rows ?? []).filter((r) => this.picks.has(r.commit)).map((r) => ({ sha: r.commit, subject: r.subject ?? "", merge: r.node.includes("merge") })); }
   // file = { path, old? } | null. Only the graph writes sha; file is also written by the detail.
   write(file) {
     if (!this.tab) return;
@@ -320,7 +337,8 @@ export class GraphView {
     this.restored = true;
     // select (screenshots): written to the key like a click, so a detached the detail in the same tab follows it.
     // Harmless to the user's own graph: the key is per tab.
-    // ctx: { row, x, y } a row's menu drawn open; compare: a row index shown as Compare with HEAD (screenshots)
+    // ctx: { row, x, y } a row's menu drawn open; compare: a row index shown as Compare with HEAD; picks: row indices multi-selected (screenshots)
+    if (this.p.picks) this.picks = new Set(this.p.picks.map((i) => this.graph.rows[i]?.commit).filter(Boolean));
     if (this.p.ctx) { const r = this.graph.rows[this.p.ctx.row]; if (r) this.ctx = { sha: r.commit, subject: r.subject ?? "", merge: r.node.includes("merge"), x: this.p.ctx.x, y: this.p.ctx.y }; }
     if (this.p.compare != null) { const r = this.graph.rows[this.p.compare]; if (r) this.selectNow("cmp:" + r.commit); return; }
     if (this.p.select != null) {
@@ -431,6 +449,7 @@ export class GraphView {
       else if (i >= 0 && !m.wip && !m.stash && this.sel !== this.headId) this.hd.confirm(cx, "checkout", { sha: this.sel, subject: this.graph.rows[i].subject ?? "" });
       cx.stop_propagation(); return;
     }
+    if (e.keystroke === "escape" && this.picks.size) { this.picks.clear(); cx.stop_propagation(); cx.notify(); return; }
     if (e.keystroke === "escape" && this.sel) { this.select(null, cx); cx.stop_propagation(); return; }
     // Cmd+C copies the commit hash; Cmd+Shift+C copies a local branch name (checked-out branch first), or the hash.
     // ponytail: copying the branch name on Cmd+C is not configurable; add a setting if needed.
@@ -448,6 +467,7 @@ export class GraphView {
     cx.stop_propagation();
   }
   move(d, cx) {
+    this.picks.clear();
     const rows = this.graph.rows, i = rows.findIndex((r) => r.commit === this.sel);
     const next = rows[Math.max(0, Math.min(rows.length - 1, i < 0 ? 0 : i + d))].commit;
     this.select(next, cx); this.follow(next);
@@ -789,7 +809,7 @@ const dashes = dashTo(c);
       // dot nodes: larger with a ring for HEAD, a ring for merges.
       const faceNode = (this.p.avatars ?? ggxSettings().avatars) !== false, face = this.avatar(m); // props.avatars: screenshots
       const cellRow = { ...r, avatar: faceNode ? face : null };
-      const on = r.commit === rowOf(this.sel);
+      const on = r.commit === rowOf(this.sel) || this.picks.has(r.commit);
       return h_flex().w_full().h(ROW_H).flex_none().items_center().overflow_hidden().relative()
         .when(on, (el) => el.bg(alpha(c, selA)))
         .when(this.orphans?.has(r.commit), (el) => el.opacity(0.5)) // on no branch: kept visible, but dimmed
@@ -823,7 +843,7 @@ const dashes = dashTo(c);
       .child(head)
       .child(div().relative().flex_1().min_h(0).flex().flex_col()
         // The press, for on_item_click (key only): a double-click and where along the row it was.
-        .on_mouse_down("left", (e, _cx) => { const l = e.local_position ?? e.position; this.press = { n: e.click_count, x: l.x, y: l.y, px: e.position.x, py: e.position.y }; })
+        .on_mouse_down("left", (e, _cx) => { const l = e.local_position ?? e.position; this.press = { n: e.click_count, x: l.x, y: l.y, px: e.position.x, py: e.position.y, cmd: Boolean(e.modifiers?.platform), shift: Boolean(e.modifiers?.shift) }; })
         .on_mouse_down("right", (e, _cx) => { this.rpress = { x: (e.local_position ?? e.position).x }; }) // for a label's menu
         .child(v_virtual_list("rows", rows.length - off, ROW_H, (i) => rows[i + off].commit, ({ start, end }) => {
         const t0 = now(), out = []; this.view = { start, end };
@@ -848,6 +868,8 @@ const dashes = dashTo(c);
           // A double-click on a branch label switches to it; the row stays selected.
           const p = this.press, lb = p?.n >= 2 && this.labelAt(sha, p.x);
           this.press = null;
+          if (p?.cmd || p?.shift) { this.pick(sha, p, cx); return; }
+          this.picks.clear(); this.pickFrom = sha;
           if (lb) { this.select(sha, cx); this.switchTo(lb, cx); return; }
           this.select(sha === this.sel ? null : sha, cx);
         })
@@ -1003,6 +1025,7 @@ const dashes = dashTo(c);
     if (this.ctx.ref) return this.refMenu(t);
     if (this.ctx.stash) return this.stashMenu(t);
     const c = this.ctx, at = { sha: c.sha, subject: c.subject }, hd = this.hd;
+    if (this.picks.size > 1 && this.picks.has(c.sha)) return this.picksMenu(t);
     const tips = new Set((this.refs.get(c.sha) ?? []).filter((x) => x.kind === "local").map((x) => x.name));
     const copy = (text, what) => (cx) => { cx.write_to_clipboard(text); hd.note(cx, `Copied ${what}`); };
     const copyMessage = (cx) => { cx.write_to_clipboard(c.body ?? c.subject); hd.note(cx, "Copied the commit message"); };
@@ -1018,8 +1041,22 @@ const dashes = dashTo(c);
           ["Copy short SHA", copy(c.sha.slice(0, 7), "the short SHA"), { icon: "hash" }], ["Copy commit message", copyMessage, { icon: "message-square-text" }]] },
         { label: "Create from this commit", items: [["Create branch here…", (cx) => hd.openBranch(cx, at), { icon: "git-branch" }], ["Create worktree here…", (cx) => hd.openWorktree(cx, at), { icon: "folder-open" }],
           ["Create tag here…", (cx) => hd.openTag(cx, at), { icon: "tag" }]] },
-        { label: "Apply changes", items: [["Revert this commit…", c.merge ? null : (cx) => hd.confirm(cx, "revert", at), { icon: "undo" }]] },
+        { label: "Apply changes", items: [["Cherry-pick this commit…", c.merge ? null : (cx) => hd.confirmApply(cx, "cherry-pick", [at]), { icon: "git-commit" }],
+          ["Revert this commit…", c.merge ? null : (cx) => hd.confirmApply(cx, "revert", [at]), { icon: "undo" }]] },
         { label: "Checkout / Move", items: [["Check out this commit… (detached HEAD)", (cx) => hd.confirm(cx, "checkout", at), { icon: "git-commit" }]] },
+      ] });
+  }
+  // The menu for several picked commits (⌘ / ⇧-click). A merge among them disables the apply items.
+  picksMenu(t) {
+    const c = this.ctx, hd = this.hd, list = this.picked(), n = list.length, merge = list.some((x) => x.merge);
+    const apply = (kind) => (merge ? null : (cx) => hd.confirmApply(cx, kind, list.map(({ sha, subject }) => ({ sha, subject }))));
+    const shas = list.map((x) => x.sha).join("\n");
+    return contextMenu(t, { x: c.x, y: c.y, paneW: this.size?.width, paneH: this.size?.height, title: `${n} commits selected${merge ? " (a merge among them)" : ""}`,
+      onClose: (cx) => { this.ctx = null; cx.notify(); },
+      sections: [
+        { label: "Apply changes", items: [[`Cherry-pick ${n} commits…`, apply("cherry-pick"), { icon: "git-commit" }], [`Revert ${n} commits…`, apply("revert"), { icon: "undo" }]] },
+        { label: "Inspect", items: [[`Copy ${n} SHAs`, (cx) => { cx.write_to_clipboard(shas); hd.note(cx, `Copied ${n} SHAs`); }, { icon: "copy" }],
+          ["Clear selection", (cx) => { this.picks.clear(); cx.notify(); }, { icon: "undo" }]] },
       ] });
   }
 }

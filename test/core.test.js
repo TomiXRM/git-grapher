@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createGgit, parseFetch, parseVersion } from "../mods/git-grapher/lib/core.js";
+import { createGgit, parseFetch, parseVersion, applyOrder } from "../mods/git-grapher/lib/core.js";
 import * as fs from "node:fs";
 import * as F from "./fx.js";
 
@@ -223,6 +223,38 @@ test("revert: overlapping later edit → conflict with HEAD unchanged", async ()
 test("revert: merge commit → refused without mutation", async () => {
   const { a } = setup(); F.git(a, "switch", "-qc", "side"); F.commit(a, "g", "side\n"); F.git(a, "switch", "-q", "main"); F.git(a, "merge", "--no-ff", "-m", "merge", "side");
   const before = F.snap(a), r = await g.revert({ root: a }, "HEAD");
+  assert.deepEqual([r.outcome, r.reason], ["refused", "merge-commit"]); F.same(a, before);
+});
+// Bulk: a chain where each commit edits the line the previous one wrote, so only one order applies cleanly.
+const chain = (a) => ["2", "3", "4"].map((v) => F.commit(a, "f", `${v}\n`, `f=${v}`)).reverse(); // newest first, as the graph lists them
+const subjects = (a, n) => F.git(a, "log", "--format=%s", `-${n}`).split("\n");
+test("applyOrder: cherry-pick runs oldest first, revert newest first", () => {
+  assert.deepEqual(applyOrder("cherry-pick", ["c", "b", "a"]), ["a", "b", "c"]);
+  assert.deepEqual(applyOrder("revert", ["c", "b", "a"]), ["c", "b", "a"]);
+});
+test("revert: a dependent chain → reverted child first, back to the original tree", async () => {
+  const { a } = setup(), original = F.git(a, "rev-parse", "HEAD^{tree}"), shas = chain(a);
+  assert.equal(F.attempt(a, "revert", "--no-edit", ...[...shas].reverse()).code === 0, false, "parent first conflicts"); F.git(a, "revert", "--abort");
+  const r = await g.revert({ root: a }, shas);
+  assert.deepEqual([r.outcome, r.n], ["completed", 3]); assert.equal(F.git(a, "rev-parse", "HEAD^{tree}"), original);
+  assert.deepEqual(subjects(a, 3), ['Revert "f=2"', 'Revert "f=3"', 'Revert "f=4"']);
+});
+test("cherryPick: a dependent chain → applied parent first onto another branch", async () => {
+  const { a } = setup(); F.git(a, "switch", "-qc", "side"); F.git(a, "switch", "-q", "main"); const shas = chain(a); F.git(a, "switch", "-q", "side");
+  assert.equal(F.attempt(a, "cherry-pick", ...shas).code === 0, false, "child first conflicts"); F.git(a, "cherry-pick", "--abort");
+  const r = await g.cherryPick({ root: a }, shas);
+  assert.deepEqual([r.outcome, r.n], ["completed", 3]); assert.equal(readFileSync(join(a, "f"), "utf8"), "4\n");
+  assert.deepEqual(subjects(a, 3), ["f=4", "f=3", "f=2"]);
+});
+test("cherryPick: overlapping edit → conflict on the first commit, HEAD unchanged", async () => {
+  const { a } = setup(); F.git(a, "switch", "-qc", "side"); const head = F.commit(a, "f", "mine\n"); F.git(a, "switch", "-q", "main");
+  const shas = chain(a); F.git(a, "switch", "-q", "side");
+  const r = await g.cherryPick({ root: a }, shas);
+  assert.equal(r.outcome, "conflict"); assert.equal(F.git(a, "rev-parse", "HEAD"), head); assert.equal(F.git(a, "rev-parse", "CHERRY_PICK_HEAD"), shas[2]);
+});
+test("cherryPick: a merge among them → refused without mutation", async () => {
+  const { a } = setup(); F.git(a, "switch", "-qc", "side"); F.commit(a, "g", "side\n"); F.git(a, "switch", "-q", "main"); F.git(a, "merge", "--no-ff", "-m", "merge", "side");
+  F.git(a, "switch", "-qc", "other", "HEAD~1"); const before = F.snap(a), r = await g.cherryPick({ root: a }, ["main", "side"]);
   assert.deepEqual([r.outcome, r.reason], ["refused", "merge-commit"]); F.same(a, before);
 });
 // detached checkout uses the requested commit
