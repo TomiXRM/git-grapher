@@ -399,3 +399,19 @@ test("a write queued before a space switch is refused once it runs; nothing reac
   assert.deepEqual(ran, []);
   assert.deepEqual(results.map((r) => [r.operation, r.reason]), [["cherry-pick", "moved"], ["conflict-abort", "moved"]]);
 });
+
+// A Pull reads its preview before it queues: the graph moving meanwhile (during the fetch it waits for, or the preview's
+// own git reads) must drop it, not queue it on the new repository or show the old prediction there.
+test("a Pull whose preview outlives a space switch is dropped, not queued on the new repository", async () => {
+  const Header = load("header.js", "Header", { previewPull: async (run) => (await run([]), { ok: false, error: { message: "stub" } }) });
+  for (const at of ["fetch", "preview"]) {
+    const block = deferred(), queued = [], results = [];
+    const hd = Object.assign(Object.create(Header.prototype), { st: chain([]), states: [], t: { root: "/A" },
+      ad: { run: () => (at === "preview" ? block.promise : Promise.resolve({ code: 1, stdout: "", stderr: "" })) },
+      fetchJob: at === "fetch" ? block.promise : null, op: (name) => queued.push(name), setSnack: (_cx, s) => s.r && results.push(s.r) });
+    const done = hd.pullTask(cx, { ok: true, basis: null }); // "Pull anyway": no basis to go stale
+    await tick(); hd.st = chain([]); hd.t = { root: "/B" }; // the graph moved to B
+    block.resolve({ code: 1, stdout: "", stderr: "" }); await done;
+    assert.deepEqual([queued, results.map((r) => r.reason), hd.dialog, hd.pulling], [[], ["moved"], null, 0], at);
+  }
+});

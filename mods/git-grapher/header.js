@@ -302,15 +302,17 @@ export class Header {
   pull(cx, confirmed = null) { cx.spawn((cx) => this.pullTask(cx, confirmed)); }
   async pullTask(cx, confirmed) {
     if (!confirmed && this.states.length) { this.dialog = { kind: "states" }; cx.notify(); return; }
+    const st = this.st; // the repository this pull is for: the graph may move to another while it previews
     this.busy = "pull"; this.pulling = (this.pulling ?? 0) + 1; this.dialog = null; this.setSnack(cx, { busy: "preview" });
     if (this.fetchJob) await this.fetchJob; // predict on the refs a running fetch brings, not the ones before it
-    const p = await previewPull(this.ad.run, { cwd: this.t.root }).catch((e) => ({ ok: false, error: { message: String(e) } }));
+    const p = this.st !== st ? null : await previewPull(this.ad.run, { cwd: this.t.root }).catch((e) => ({ ok: false, error: { message: String(e) } }));
     this.busy = null; this.snack = null;
+    if (this.st !== st) { this.pulling = Math.max(0, this.pulling - 1); this.setSnack(cx, { busy: null, r: moved("pull") }); return; }
     const basis = p.ok ? `${p.data.basis.headOid}:${p.data.basis.upstreamOid}` : null;
     // Re-read HEAD and upstream when confirming; if the prediction's basis changed, show a fresh prediction instead.
     // A change the preview saw while it read (observed-basis-changed) is stale too, even if HEAD and upstream look the same.
-    const moved = p.ok && p.data.history?.reason === "observed-basis-changed";
-    const stale = !!confirmed && ((confirmed.basis && basis !== confirmed.basis) || moved);
+    const shifted = p.ok && p.data.history?.reason === "observed-basis-changed";
+    const stale = !!confirmed && ((confirmed.basis && basis !== confirmed.basis) || shifted);
     if (!stale && (confirmed?.ok || (p.ok && p.data.predicted === "clean"))) return this.op("pull", () => this.pullAt(basis), cx);
     this.pulling = Math.max(0, this.pulling - 1); // the dialog keeps auto fetch paused from here (dialog.kind)
     this.dialog = { kind: "pull", p, basis, stale, at: new Date(), open: ggSettings().verbose }; cx.notify();
