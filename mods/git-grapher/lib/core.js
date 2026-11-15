@@ -63,7 +63,6 @@ export function parseFetch(text) {
 
 export function createGgit({ run, testPaths }) {
   const git = (args, cwd) => run(args, { cwd });
-  const gitPaths = new Map(); // cwd → its state files' absolute paths: where the git directory is never changes
 
   async function version() {
     const r = await git(["version"]);
@@ -92,13 +91,11 @@ export function createGgit({ run, testPaths }) {
 
   async function inProgress(t) {
     const cwd = t.root ?? t.gitDir;
-    if (!gitPaths.has(cwd)) {
-      const r = await git([...READ, "rev-parse", "--path-format=absolute", ...STATES.flatMap(([, f]) => ["--git-path", f])], cwd);
-      if (r.code !== 0) return { ok: false, stderr: r.stderr.trim() };
-      gitPaths.set(cwd, lines(r.stdout).slice(0, STATES.length));
-    }
     // One process for every check: this runs on each refresh, and a call costs about 13 ms in herdr.
-    const here = await testPaths(gitPaths.get(cwd), { cwd });
+    // The paths are read each time: the git directory can move (init --separate-git-dir, submodule absorbgitdirs).
+    const r = await git([...READ, "rev-parse", "--path-format=absolute", ...STATES.flatMap(([, f]) => ["--git-path", f])], cwd);
+    if (r.code !== 0) return { ok: false, stderr: r.stderr.trim() };
+    const here = await testPaths(lines(r.stdout).slice(0, STATES.length), { cwd });
     const found = [];
     for (let i = 0; i < STATES.length; i++) {
       const [kind, file, extra] = STATES[i];

@@ -38,9 +38,10 @@ export function drive(store, { machine = null, pollMs = null } = {}, cx) {
     });
   };
   // Whether git ignores every one of these files: one check-ignore rather than a read (a build or a dev server writes
-  // ignored files many times a second). Too many to pass as arguments: assume not.
+  // ignored files many times a second). Too many to pass as arguments: assume not. A .gitignore or .gitattributes counts
+  // even when ignored itself: it changes which files show and how they diff.
   const ignored = async (cwd, list) => {
-    if (list.length > 500) return false;
+    if (list.length > 500 || list.some((p) => /\/\.git(ignore|attributes)$/.test(p))) return false;
     const r = await store.adapter.run(["-c", "core.quotePath=false", "check-ignore", "--", ...list], { cwd }).catch(() => null);
     return r?.code === 0 && r.stdout.split("\n").filter(Boolean).length === list.length; // one line per ignored file
   };

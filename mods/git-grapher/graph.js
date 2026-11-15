@@ -744,8 +744,9 @@ export class GraphView {
     // in the 7 px divider gap, and start the lane path's [4, ROW_H/4 - 4] dash at the GRAPH edge.
     // ponytail: the path gap is 3.25 rather than 3 px; align the periods if the difference becomes visible.
     // One dashed path rather than 60 dash elements: a frame's cost in herdr is mostly the elements it creates.
-    const dashTo = (c) => div().flex_1().min_w(4).h(2).relative().overflow_hidden()
-      .child(paint_path(dashRun(), c).absolute().right(0).top(0).w(DASH_RUN).h(2));
+    // End-justified like the 60 dashes were (an absolute .right() box lands at the left edge in herdr, see shadowEdge).
+    const dashTo = (c) => h_flex().flex_1().min_w(4).h(2).justify_end().overflow_hidden()
+      .child(paint_path(dashRun(), c).flex_none().w(DASH_RUN).h(2));
     const dashGap = (c) => div().w(7).flex_none().h_full().flex().items_center().child(div().w(4).h(2).bg(c));
     const wipRow = (r, w, c, i) => {
       const on = r.commit === this.sel;

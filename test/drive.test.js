@@ -82,3 +82,10 @@ test("drive: an ignored-only flush does not swallow a later batch's stamp", asyn
   assert.deepEqual(JSON.parse(JSON.stringify(h.store.reads)), [["/r"]]);
   assert.equal(h.events.stamps, 1);
 });
+
+// A .gitignore that ignores itself still changes which files show: it is read even when check-ignore says ignored.
+test("drive: an ignored .gitignore still reads its worktree", async t => {
+  const h = harness(); t.after(() => h.dispose()); h.start();
+  await h.batch(["/r/node_modules/.gitignore"]); await h.advance(300);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.store.reads)), [["/r"]]);
+});
