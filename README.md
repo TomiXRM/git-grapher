@@ -85,6 +85,7 @@ Keys, in the `"global"` section of `~/.config/herdr-app/keys.json`:
 
   ![Branch label menu](docs/media/branch-menu.gif)
 
+- Right-click a commit to cherry-pick or revert it. `⌘`-click toggles more commits, `⇧`-click picks a range (`Esc` clears); right-click them to cherry-pick (oldest first) or revert (newest first) them all.
 - Pull, Push, Branch, Stash, Pop in the toolbar, with ahead / behind counts.
 - Merge conflicts: take a side, edit, save, commit the merge.
 - Sidebar with branches, remotes, worktrees, tags, stashes.
