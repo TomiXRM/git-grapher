@@ -363,23 +363,29 @@ test("pull: no basis to compare (no upstream / detached / unborn, 'Pull anyway')
 });
 
 // A side panel is one copy for every space: a space switch binds it to the new space's repository, and the old binding's
-// loops end (its store's news isn't applied, its cx throws), so actions can't reach the previous repository.
-test("side panel: a space switch rebinds the graph to that space's repository and ends the old binding", async () => {
-  let active = "A"; const stores = [], drives = [], applied = [];
-  const storeFor = (_ad, root) => { let wake; const st = { state: { root }, next: () => new Promise((r) => { wake = r; }), refresh: async () => {}, push: (s) => wake(s) }; stores.push(st); return st; };
+// news stops applying, so actions can't reach the previous repository. Coming back reuses the repository's store, and its
+// drive: each drive holds a watch per worktree open, so one per visit piled up until Herdr's host-task limit stalled the copy.
+test("side panel: a space switch rebinds the graph to that space's repository; a store is driven once", async () => {
+  let active = "A"; const stores = new Map(), drives = [], applied = [];
+  const storeFor = (_ad, root) => {
+    if (!stores.has(root)) { let wake; stores.set(root, { state: { root }, next: () => new Promise((r) => { wake = r; }), refresh: async () => {}, push: (s) => wake(s) }); }
+    return stores.get(root);
+  };
   const GraphView = load("graph.js", "GraphView", { spaces: () => [{ id: active, active: true }], gitRun: async (_c, _a, { cwd }) => ({ code: 0, stdout: cwd }),
-    storeFor, herdrAdapter: () => ({}), exec: null, drive: (_st, _o, c) => drives.push(c) });
+    storeFor, herdrAdapter: () => ({}), exec: null, drive: (st) => drives.push(st.state.root) });
   const gv = Object.create(GraphView.prototype);
   Object.assign(gv, { p: {}, dv: {}, hd: { attach() {} }, cv: {}, locate: async () => ({ dir: "/" + active }), apply: (s) => applied.push(s) });
   const cx = { notify() {}, sleep: tick, spawn(fn) { return Promise.resolve().then(() => fn(cx)); } };
+  const settle = async () => { for (let i = 0; i < 4; i++) await tick(); };
   gv.retarget(cx); await gv.attach(cx); await tick();
-  stores[0].push("A1"); await tick();
-  active = "B"; gv.retarget(cx); await tick(); await tick(); await tick();
+  stores.get("/A").push("A1"); await tick();
+  active = "B"; gv.retarget(cx); await settle();
   assert.equal(gv.repo, "/B");
-  stores[0].push("A2"); stores[1].push("B1"); await tick(); await tick();
+  stores.get("/A").push("A2"); stores.get("/B").push("B1"); await settle();
   assert.deepEqual(applied, ["A1", "B1"]);
-  assert.throws(() => drives[0].notify(), /replaced/); drives[1].notify();
-  gv.retarget(cx); assert.equal(stores.length, 2, "no rebind while the space stays");
+  gv.retarget(cx); assert.equal(stores.size, 2, "no rebind while the space stays");
+  active = "A"; gv.retarget(cx); await settle(); active = "B"; gv.retarget(cx); await settle();
+  assert.deepEqual(drives, ["/A", "/B"]);
 });
 
 // Header and Conflict Mode writes read the bound repository when they run. One still waiting in the old repository's

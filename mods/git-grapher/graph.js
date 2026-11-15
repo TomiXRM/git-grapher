@@ -139,8 +139,10 @@ export class GraphView {
       const st = (this.st = storeFor(herdrAdapter(exec, this.machine), this.repo, this.machine, p.logLimit ? { limit: p.logLimit } : {}));
       this.dv.store = st;
       cx.spawn(async (cx) => { for (;;) { const s = await st.next(); if (!live()) return; this.apply(s, cx); } });
-      // The drive starts before the first read, so a bump during that read is not taken as already seen.
-      drive(st, { machine: this.machine, pollMs: p.pollMs }, cx); // watch + poll + copies' bump → refresh
+      // The drive starts before the first read, so a bump during that read is not taken as already seen. Once per store:
+      // a side panel comes back to a repository's store on each space switch, and every drive keeps one watchFolder call
+      // per worktree outstanding, so a drive per visit piled up until Herdr's 1024 host-task limit stalled the copy.
+      if (!st.driven) { st.driven = true; drive(st, { machine: this.machine, pollMs: p.pollMs }, outer); } // watch + poll + copies' bump → refresh
       await st.refresh();
       if (!live()) return;
       this.hd.attach(st, cx);
