@@ -92,6 +92,15 @@ function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } ca
 // The row a selection stands on: "<sha>", "cmp:<sha>" (compare with HEAD) or "br:<tip>:<branch>" (a branch since it branched).
 const rowOf = (sel) => sel?.replace(/^cmp:/, "").replace(/^br:([0-9a-f]+):.*$/, "$1") ?? null;
 
+// A cx whose every use throws once alive() is false, so loops started with it end at their next cx use.
+const liveCx = (cx, alive) => new Proxy(cx, {
+  get(t, k) {
+    if (!alive()) throw Error("git-grapher: replaced by another repository");
+    if (k === "spawn") return (fn) => t.spawn((c) => fn(liveCx(c, alive)));
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  },
+});
+
 export class GraphView {
   init(_p, cx) {
     const p = (this.p = props() ?? {});
@@ -112,25 +121,46 @@ export class GraphView {
     this.stats = "loading…"; this.builds = []; this.off = p.top ?? 0; // top: first row shown (screenshots; the list cannot be scrolled from code)
     // mod.json focusable: pane.go hands us the keyboard with "focus" (AGENTS.md).
     cx.spawn(async () => { for (;;) if ((await nextCommand()) === "focus") this.focus.focus(); });
-    cx.spawn(async (cx) => {
-      try {
-        const w = await this.locate(cx);
-        if (!w) { this.stats = "Not a git repository here — open the graph from a pane inside a repo."; cx.notify(); return; }
-        // The repository store owns this copy's reads and writes; the graph renders its state.
-        const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd: w.dir, on: w.on ?? undefined }).catch(() => null);
-        this.repo = top?.code === 0 ? top.stdout.trim() : w.dir; this.machine = w.on ?? null;
-        this.st = storeFor(herdrAdapter(exec, this.machine), this.repo, this.machine, this.p.logLimit ? { limit: this.p.logLimit } : {});
-        this.dv.store = this.st;
-        cx.spawn(async (cx) => { for (;;) { const s = await this.st.next(); this.apply(s, cx); } });
-        // The drive starts before the first read, so a bump during that read is not taken as already seen.
-        drive(this.st, { machine: this.machine, pollMs: this.p.pollMs }, cx); // watch + poll + copies' bump → refresh
-        await this.st.refresh();
-        this.hd.attach(this.st, cx);
-        // props.walk: n presses of ↓ a quarter second apart, after the first frame (screenshots of follow(); no synthetic input).
-        if (p.walk) { await cx.sleep(800); for (let k = 0; k < p.walk; k++) { this.move(1, cx); await cx.sleep(250); } }
-      }
-      catch (e) { this.stats = "error: " + e; cx.notify(); }
-    });
+    cx.spawn(async (cx) => this.attach(cx));
+  }
+
+  // Bind this copy to the repository locate() finds. A copy in a layout block (a side panel) outlives a space switch,
+  // so render() binds it again; the previous binding's loops end at their next cx use, as Herdr ends a reloaded build's.
+  async attach(outer) {
+    const gen = (this.gen = (this.gen ?? 0) + 1), live = () => this.gen === gen, cx = liveCx(outer, live), p = this.p;
+    try {
+      const w = await this.locate(cx);
+      if (!live()) return;
+      if (!w) { this.stats = "Not a git repository here — open the graph from a pane inside a repo."; cx.notify(); return; }
+      // The repository store owns this copy's reads and writes; the graph renders its state.
+      const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd: w.dir, on: w.on ?? undefined }).catch(() => null);
+      if (!live()) return;
+      this.repo = top?.code === 0 ? top.stdout.trim() : w.dir; this.machine = w.on ?? null;
+      const st = (this.st = storeFor(herdrAdapter(exec, this.machine), this.repo, this.machine, p.logLimit ? { limit: p.logLimit } : {}));
+      this.dv.store = st;
+      cx.spawn(async (cx) => { for (;;) { const s = await st.next(); if (!live()) return; this.apply(s, cx); } });
+      // The drive starts before the first read, so a bump during that read is not taken as already seen.
+      drive(st, { machine: this.machine, pollMs: p.pollMs }, cx); // watch + poll + copies' bump → refresh
+      await st.refresh();
+      if (!live()) return;
+      this.hd.attach(st, cx);
+      // props.walk: n presses of ↓ a quarter second apart, after the first frame (screenshots of follow(); no synthetic input).
+      if (p.walk) { await cx.sleep(800); for (let k = 0; k < p.walk; k++) { this.move(1, cx); await cx.sleep(250); } }
+    }
+    catch (e) { if (live()) { this.stats = "error: " + e; outer.notify(); } }
+  }
+
+  // A pane renders only while its tab shows, so only a layout-block copy sees the active space change.
+  // props.repo pins the repository (screenshots).
+  retarget(cx) {
+    const space = spaces().find((s) => s.active)?.id;
+    if (this.space !== undefined && space !== this.space && !this.p.repo) {
+      this.gen = (this.gen ?? 0) + 1; // ends the old binding now, before the new one locates
+      Object.assign(this, { st: null, repo: null, graph: null, meta: [], refs: new Map(), files: new Map(), sel: null, ctx: null, restored: false, stats: "loading…" });
+      this.dv.store = null; Object.assign(this.hd, { st: null, h: null, states: [], name: "", dialog: null }); Object.assign(this.cv, { c: null, sel: null, drafts: new Map() });
+      cx.spawn(async (cx) => this.attach(cx));
+    }
+    this.space = space;
   }
 
   // Prefer the initiating pane's live folder if it is in this tab, then this tab's saved repository, then a terminal
@@ -640,6 +670,7 @@ export class GraphView {
     setZoom(this.p.zoom ?? ggxSettings().zoom); // Zoom is shared with detached details; props.zoom overrides it for screenshots.
     // Only a visible copy renders, so focused().tab identifies its tab during render.
     this.tab = focused()?.tab ?? this.tab;
+    this.retarget(cx);
     this.restore();
     // light previews the first light theme without changing the global theme.
     const t = applyTheme(this.p.light ? { ...theme(), ...(themes().find((x) => x.light)?.colors ?? {}) } : theme(), this.p.theme); // Settings → Theme (props.theme: screenshots)
