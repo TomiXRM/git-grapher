@@ -53,11 +53,15 @@ test("lane rendering: a ref connector keeps its colour/dash group's original pas
       { kind: "pass", from: 4, to: 4, color: 3, dashed },
       { kind: "pass", from: 5, to: 5, color: 6 },
     ] };
-    const cell = d.laneCell(r, { lanes: 9, palette: Array.from({ length: 7 }, (_, i) => `c${i}`), connectFrom: 0 });
-    const connector = cell.kids.findIndex(e => dashed ? "overflow_hidden" in e.style
-      : e.style.top?.[0] === 13.5 && e.style.left?.[0] === 0);
-    const laterPass = cell.kids.findIndex(e => e.style.left?.[0] === 126 && e.style.bg?.[0] === "c6");
-    assert.ok(connector >= 0 && connector < laterPass, "later pass must paint above connector");
+    const palette = Array.from({ length: 7 }, (_, i) => `c${i}`);
+    // In full, and culled to lanes 5-7: lane 4's colour-3 pass and the lane-8 node are off-screen, the slot stays.
+    for (const view of [undefined, [5, 7]]) {
+      const cell = d.laneCell(r, { lanes: 9, palette, connectFrom: 0, view });
+      const connector = cell.kids.findIndex(e => dashed ? "overflow_hidden" in e.style
+        : e.style.top?.[0] === 13.5 && e.style.left?.[0] === 0);
+      const laterPass = cell.kids.findIndex(e => e.style.left?.[0] === 126 && e.style.bg?.[0] === "c6");
+      assert.ok(connector >= 0 && connector < laterPass, `later pass must paint above connector (view ${view})`);
+    }
     const absent = d.laneCell({ ...r, edges: r.edges.slice(1) }, { lanes: 9, palette: Array.from({ length: 7 }, (_, i) => `c${i}`), connectFrom: 0 });
     assert.equal(absent.kids[0].style.bg[0], "c6", "new connector group appends after existing pass groups");
   }

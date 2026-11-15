@@ -81,10 +81,10 @@ function buildGeometry(row, connected, [lo, hi] = [0, Infinity]) {
   };
   const path = (g) => g.p ??= PathBuilder.stroke(EDGE_W);
   for (const e of row.edges) {
+    const straight = e.kind === "pass" && e.from === e.to, g = group(straight ? 0 : 1, e.color, e.dashed); // even off-screen: the order stays
     const [a, b] = e.kind === "pass" ? [e.from, e.to] : e.kind === "into" ? [e.from, row.lane] : [row.lane, e.to];
     if (!near(a, b)) continue;
-    const straight = e.kind === "pass" && e.from === e.to;
-    const g = group(straight ? 0 : 1, e.color, e.dashed), rect = solidVertical(e, row.lane, ROW_H, wip ? ring : 0);
+    const rect = solidVertical(e, row.lane, ROW_H, wip ? ring : 0);
     if (rect) g.rects.push(rect);
     else edge(path(g), e, row.lane, wip ? ring : 0);
   }
