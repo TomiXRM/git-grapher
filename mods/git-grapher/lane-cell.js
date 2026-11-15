@@ -13,6 +13,9 @@ export const AV = 20, RING = 1.5; // Avatar diameter and ring width.
 export const PAD_L = 6;
 export const X = (lane) => PAD_L + lane * LANE_W + LANE_W / 2;
 export const cellW = (lanes) => PAD_L + lanes * LANE_W;
+// The lanes that can show between x0 and x1 (cell coordinates), plus one each side for curves, avatars and the
+// HEAD glow. A row draws only these: a repository with many lanes paints a few of them in a narrow GRAPH column.
+export const laneWindow = (x0, x1) => [Math.max(0, Math.floor((x0 - PAD_L) / LANE_W) - 1), Math.ceil((x1 - PAD_L) / LANE_W)];
 
 // Add an edge as a subpath, with quadratic corners controlled at each corner point.
 function edge(p, e, lane, y0 = 0) {
@@ -52,7 +55,8 @@ function glow(cx, r0, c) {
 
 /**
  * @param row  graph.v1 Row, plus optional `avatar` ({file, initial, tint})
- * @param opts { lanes, palette: Color[], fg: Color, connectFrom?: number (x where the ref connector starts) }
+ * @param opts { lanes, palette: Color[], fg: Color, connectFrom?: number (x where the ref connector starts),
+ *   view?: [lo, hi] (laneWindow; lanes outside it are not drawn), cache?, index? }
  */
 function nodeShape(row) {
   const x = X(row.lane), stash = row.node === "stash", wip = row.node === "wip" || stash; // stash: the WIP ring with a square inside
@@ -64,7 +68,8 @@ function nodeShape(row) {
   return { x, stash, wip, head, av, r, ring };
 }
 
-function buildGeometry(row, connected) {
+function buildGeometry(row, connected, [lo, hi] = [0, Infinity]) {
+  const near = (a, b) => Math.max(a, b) >= lo && Math.min(a, b) <= hi;
   const { x, wip, r, ring } = nodeShape(row);
 
   // Preserve colour/layer order. Only groups with curves, dashes or rings need a path.
@@ -76,12 +81,14 @@ function buildGeometry(row, connected) {
   };
   const path = (g) => g.p ??= PathBuilder.stroke(EDGE_W);
   for (const e of row.edges) {
+    const [a, b] = e.kind === "pass" ? [e.from, e.to] : e.kind === "into" ? [e.from, row.lane] : [row.lane, e.to];
+    if (!near(a, b)) continue;
     const straight = e.kind === "pass" && e.from === e.to;
     const g = group(straight ? 0 : 1, e.color, e.dashed), rect = solidVertical(e, row.lane, ROW_H, wip ? ring : 0);
     if (rect) g.rects.push(rect);
     else edge(path(g), e, row.lane, wip ? ring : 0);
   }
-  if (ring) circle(path(group(1, row.color, false)), x, ring);
+  if (ring && near(row.lane, row.lane)) circle(path(group(1, row.color, false)), x, ring);
 
   const reach = x - (ring || r);
   // Keep the connector in its original colour/dash group's insertion slot.
@@ -100,13 +107,14 @@ function buildGeometry(row, connected) {
   return { paths, connector, reach };
 }
 
-export function laneCell(row, { lanes, palette, connectFrom, cache, index }) {
+export function laneCell(row, { lanes, palette, connectFrom, cache, index, view }) {
   const color = (i) => palette[i % palette.length], connected = connectFrom !== undefined;
   const { x, stash, head, av, r, wip } = nodeShape(row);
-  const geometry = cache ? cache.get(index, row, connected, () => buildGeometry(row, connected)) : buildGeometry(row, connected);
+  const geometry = cache ? cache.get(index, row, connected, () => buildGeometry(row, connected, view)) : buildGeometry(row, connected, view);
+  const shown = !view || (row.lane >= view[0] && row.lane <= view[1]); // the node; graph.js marks an off-screen one at the edge
 
   let cell = div().relative().flex_none().w(cellW(lanes)).h(ROW_H);
-  if (av && head) cell = cell.children(glow(x, AV / 2, color(row.color))); // band < glow < lines < node
+  if (shown && av && head) cell = cell.children(glow(x, AV / 2, color(row.color))); // band < glow < lines < node
   // sx only offsets/clips this element. Geometry starts at zero so the dashed
   // connector's phase still starts at the visible column edge, as before.
   const connector = () => geometry.connector
@@ -118,6 +126,7 @@ export function laneCell(row, { lanes, palette, connectFrom, cache, index }) {
     ...(path ? [paint_path(path, color(c)).absolute().inset_0()] : []),
     ...(connected && connectFrom < geometry.reach ? [connector()] : []),
   ]));
+  if (!shown) return cell;
   if (av) cell = cell.child(avatarNode(row.avatar, color(row.color)).absolute().left(x - AV / 2).top(MID - AV / 2));
   else if (!wip) cell = cell.child(div().absolute().left(x - r).top(MID - r).size(2 * r).rounded_full().bg(color(row.color)));
   if (stash) cell = cell.child(div().absolute().left(x - 2.5).top(MID - 2.5).size(5).rounded(1).bg(color(row.color)));

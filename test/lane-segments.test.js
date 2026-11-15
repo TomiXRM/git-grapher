@@ -108,3 +108,16 @@ test("lane rendering: downloaded avatars and new palette colours reuse paths wit
   const oldElements = new Set(first);
   for (const e of second) assert.ok(!oldElements.has(e), "every native element is fresh across renders");
 });
+
+// Rendering budget: a frame costs about what its rows create, native paths most (~20 µs each in herdr), so in a
+// repository with many lanes (old stashes keep a dashed lane down to their base) a row draws only the lanes in view.
+test("lane rendering: a row in a 68-lane graph draws only the lanes the column shows", () => {
+  const d = drawing(), palette = ["c0", "c1", "c2", "c3", "c4", "c5"];
+  const edges = Array.from({ length: 68 }, (_, l) => ({ kind: "pass", from: l, to: l, color: l % 6, dashed: l % 2 === 0 }));
+  const r = { ...row("commit", edges), lane: 40 }, made = (opts) => { const n = d.elements.length; d.laneCell(r, { lanes: 68, palette, ...opts }); return d.elements.slice(n); };
+  const all = made({}), seen = made({ view: [0, 13] }); // lanes 0-13: 7 solid, 7 dashed in 3 colours; the node is off to the right
+  assert.equal(all.length, 40, "unculled: the cell, 34 rects, 3 paths, the avatar and its picture");
+  assert.deepEqual(seen.map((e) => e.type).sort(), ["div", ...Array(7).fill("div"), ...Array(3).fill("path")].sort(), "the cell, 7 rects, 3 dashed paths, no node");
+  const xs = d.built.slice(-3).flatMap((p) => p.commands.filter(([c]) => c === "move_to").map(([, x]) => x));
+  assert.ok(xs.every((x) => x <= 6 + 13 * 22 + 11), "the paths hold only lanes in view");
+});
