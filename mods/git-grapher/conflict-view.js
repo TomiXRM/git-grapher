@@ -134,10 +134,14 @@ export class ConflictView {
   }
   resetAll(d, cx) { d.choices = []; d.ed.set_value(d.f.merged); this.arm = null; cx.notify(); }
 
-  // ---- writes: all through the store's one queue; the result is a snackbar card (header.js).
+  // ---- writes: all through the store's one queue; the result is a snackbar card (header.js). fn reads this.ad / this.root
+  // when it runs, so a write still waiting when the graph moves to another repository is refused (as Header.op does).
   write(name, fn, cx) {
-    const hd = this.gv.hd; hd.busy = name; hd.setSnack(cx, { busy: name });
-    cx.spawn(async (cx) => { const r = await this.st.write(name, fn); if (hd.busy === name) hd.busy = null; hd.setSnack(cx, { busy: null, r }); this.sync(this.st.state, cx); });
+    const hd = this.gv.hd, st = this.st; hd.busy = name; hd.setSnack(cx, { busy: name });
+    cx.spawn(async (cx) => {
+      const r = await st.write(name, () => (this.st === st ? fn() : { operation: name, outcome: "refused", reason: "moved", stderr: "The graph switched to another repository before this ran." }));
+      if (hd.busy === name) hd.busy = null; hd.setSnack(cx, { busy: null, r }); if (this.st === st) this.sync(st.state, cx);
+    });
   }
   save(d, cx) {
     const request = conflictSaveRequest(this.c, d, d.ed.value());

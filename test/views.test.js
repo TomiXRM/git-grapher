@@ -381,3 +381,21 @@ test("side panel: a space switch rebinds the graph to that space's repository an
   assert.throws(() => drives[0].notify(), /replaced/); drives[1].notify();
   gv.retarget(cx); assert.equal(stores.length, 2, "no rebind while the space stays");
 });
+
+// Header and Conflict Mode writes read the bound repository when they run. One still waiting in the old repository's
+// queue when the graph moves to another must be refused, not run on the new repository.
+test("a write queued before a space switch is refused once it runs; nothing reaches the new repository", async () => {
+  const Header = load("header.js", "Header"), ConflictView = load("conflict-view.js", "ConflictView");
+  const log = [], storeA = chain(log), storeB = chain(log), block = deferred(), ran = [], results = [];
+  const g = (root) => ({ cherryPick: (t) => ran.push(`${root} cherry-pick in ${t.root}`) });
+  const hd = Object.assign(Object.create(Header.prototype), { st: storeA, g: g("A"), t: { root: "/A" }, setSnack: (_cx, s) => s.r && results.push(s.r) });
+  const gv = { hd, st: storeA }, cv = Object.assign(Object.create(ConflictView.prototype), { gv, sync() {} });
+  storeA.write("blocker", () => block.promise);
+  hd.op("cherry-pick", () => hd.g.cherryPick(hd.t, ["c"]), cx);
+  cv.write("conflict-abort", () => ran.push(`abort in ${cv.root}`), cx);
+  await tick();
+  Object.assign(hd, { st: storeB, g: g("B"), t: { root: "/B" } }); gv.st = storeB; // the graph moved to B
+  block.resolve(); for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(ran, []);
+  assert.deepEqual(results.map((r) => [r.operation, r.reason]), [["cherry-pick", "moved"], ["conflict-abort", "moved"]]);
+});

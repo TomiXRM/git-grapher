@@ -19,6 +19,7 @@ import { settings as ggSettings, setSetting } from "./themes.js";
 // Icons are read from the installed mod folder; herdr does not read svg through a symlinked one, so scripts/dev-link.sh copies.
 const ICON = (n) => `mods/git-grapher/icons/${n}.svg`;
 const AUTO_MS = 60_000;
+const moved = (operation) => ({ operation, outcome: "refused", reason: "moved", stderr: "The graph switched to another repository before this ran." });
 const STAGE = [[640, "full"], [500, "labels"], [340, "icons"], [0, "overflow"]];
 const alpha = (c, a) => (c && c.length === 7 ? c + a : c);
 const hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -51,6 +52,7 @@ function resultText(r) {
   // Use timeout wording only for timeouts or killed processes.
   if (r.outcome === "unknown") return r.operation === "pull" && r.exitCode != null ? `Could not tell what the pull did: ${first(r.stderr)}`
     : r.stderr && !["timeout-or-not-started", "killed"].includes(r.reason) ? `Result unknown: ${first(r.stderr)}` : UNKNOWN;
+  if (r.reason === "moved") return r.stderr;
   const err = first(r.stderr);
   switch (r.operation) {
     case "fetch": return r.outcome === "completed" ? `Fetched ${r.refs.length} ref${r.refs.length === 1 ? "" : "s"} from ${r.remote}`
@@ -254,7 +256,7 @@ export class Header {
     let r;
     try {
       // A Pull / Push already queued counts as running: a Fetch slipping in before it would move the refs it was planned on.
-      const queued = !!(this.netRunning || this.netQueued), job = queued ? this.st.write("fetch", () => this.g.fetch(this.t, this.h)) : this.g.fetch(this.t, this.h);
+      const st = this.st, queued = !!(this.netRunning || this.netQueued), job = queued ? st.write("fetch", () => (this.st === st ? this.g.fetch(this.t, this.h) : moved("fetch"))) : this.g.fetch(this.t, this.h);
       this.fetchJob = job.catch(() => null);
       // Pull / Push await only an outside-queue fetch. Waiting for a fetch queued behind them would deadlock
       // a Push -> Push -> Fetch sequence.
@@ -270,17 +272,20 @@ export class Header {
     cx.notify();
   }
 
-  // All views share the store's write queue; a click waits its turn rather than being dropped.
+  // All views share the store's write queue; a click waits its turn rather than being dropped. A write still waiting when
+  // the graph moves to another repository (a side panel following the active space) is refused, never run on the new one.
   op(name, fn, cx) {
     if (!this.st) return;
     this.busy = name; this.menu = null; this.setSnack(cx, { busy: name });
     // Await an active outside-queue fetch before Pull / Push so network jobs cannot overlap.
-    const net = name === "pull" || name === "push";
+    const net = name === "pull" || name === "push", st = this.st;
     if (net) this.netQueued = (this.netQueued ?? 0) + 1;
     cx.spawn(async (cx) => {
-      const r = await this.st.write(name, async () => {
+      const r = await st.write(name, async () => {
+        if (this.st !== st) return moved(name);
         if (!net) return fn();
         if (this.freeFetch) await this.freeFetch;
+        if (this.st !== st) return moved(name);
         this.netRunning = true;
         try { return await fn(); } finally { this.netRunning = false; }
       }).finally(() => { if (net) this.netQueued--; if (name === "pull") this.pulling = Math.max(0, (this.pulling ?? 0) - 1); });
@@ -317,11 +322,12 @@ export class Header {
   // HEAD: "Pull anyway") or a read that fails, git pull decides, as on the command line.
   // ponytail: a ref moving between this check and git pull's own start is still possible; git pull itself is the last word.
   async pullAt(basis) {
-    const r = /^[0-9a-f]+:[0-9a-f]+$/.test(basis ?? "") ? await this.ad.run(["rev-parse", "HEAD", "@{upstream}"], { cwd: this.t.root }).catch(() => null) : null;
+    const { ad, g, t } = this; // the repository this pull was queued for, even if the graph moves meanwhile
+    const r = /^[0-9a-f]+:[0-9a-f]+$/.test(basis ?? "") ? await ad.run(["rev-parse", "HEAD", "@{upstream}"], { cwd: t.root }).catch(() => null) : null;
     const now = r?.code === 0 ? r.stdout.trim().split("\n").join(":") : null;
     if (now && now !== basis) return { operation: "pull", outcome: "refused", reason: "stale",
       stderr: "The branch or its upstream moved after the preview. Pull again to see what it would do now." };
-    return this.g.pull(this.t);
+    return g.pull(t);
   }
 
   createBranch(cx) {
