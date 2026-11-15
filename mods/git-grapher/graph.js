@@ -7,7 +7,7 @@
 // Optional props: repo, wB, wG, sx (initial horizontal scroll), top, sweep (performance run), light (light-theme preview),
 // select (initial row), walk (initial arrow-key steps), pollMs, motionMs, drawer ("bottom" | "right"), file (initial diff).
 import { gitRun } from "./run.js";
-import { div, h_flex, svg, v_flex, v_virtual_list, setZoom, image } from "./ui/zoom.js";
+import { div, h_flex, svg, v_flex, v_virtual_list, setZoom, image, paint_path, PathBuilder } from "./ui/zoom.js";
 
 import { VirtualListScrollHandle, InputState } from "gpui-base";
 import { rail as sideRail, panel as sidePanel } from "./sidebar.js";
@@ -17,7 +17,7 @@ import { layout } from "./lib/layout.js";
 import { herdrAdapter } from "./lib/core.js";
 import { storeFor } from "./lib/store.js";
 import { drive } from "./drive.js";
-import { laneCell, LANE_W, ROW_H, X, AV, cellW } from "./lane-cell.js";
+import { laneCell, laneWindow, LANE_W, ROW_H, X, AV, cellW } from "./lane-cell.js";
 import { LanePathCache } from "./lib/lane-cache.js";
 import { RedrawGate } from "./lib/redraw.js";
 import { zoom } from "./ui/zoom.js";
@@ -46,6 +46,10 @@ const WIP_A = { dark: "40", light: "33" }; // WIP row tint: the whole row in its
 const SEL_A = { dark: "59", light: "66" }, SEL_BAR = 4; // The light selection tint must exceed its 4d band so it stands out from neighbouring rows.
 const lum = (c) => { const n = parseInt(c.slice(1, 7), 16); return ((n >> 16) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114) / 255; };
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+// The WIP / stash dashes: 4 on, 3 off, ending on a 3 px gap at the right. Built once per zoom; paths are immutable.
+const DASH_RUN = 60 * 7;
+let dashPath = null;
+const dashRun = () => (dashPath?.z === zoom() ? dashPath : (dashPath = { z: zoom(), p: PathBuilder.stroke(2).move_to(0, 1).line_to(DASH_RUN, 1).dash_array([4, 3]).build() })).p;
 // Drawer shares are draggable and retained per side, using the spring from ui/segmented.js.
 // Defaults: bottom graph/detail 6:4; right graph/detail 7:3. Apply the same shares after detaching via layout.resize
 // because pane.split has no size argument.
@@ -718,7 +722,8 @@ export class GraphView {
     const { b: wB, g: wG, a: wA } = this.w;
     const lanes = this.graph.lane_count, rows = this.graph.rows;
     const rowZoom = zoom();
-    this.lanePaths.configure(this.layoutGeneration, rowZoom);
+    const view = laneWindow(this.sx, this.sx + wG); // only these lanes are drawn
+    this.lanePaths.configure(this.layoutGeneration, rowZoom, view);
     const divider = (col) => div().flex_none().w(7).h_full().cursor_col_resize().flex().justify_center()
       .child(div().w(1).h_full().bg(this.drag?.col === col ? t.accent ?? fg : alpha(fg, "26")))
       .on_mouse_down("left", (e, cx) => { this.drag = { col, x0: e.position.x, w0: this.w[col] }; cx.stop_propagation(); cx.notify(); });
@@ -739,12 +744,15 @@ export class GraphView {
     // Align WIP / stash dashes across BRANCH and GRAPH: end on a 3 px gap at the column edge, fit one 4 + 3 period
     // in the 7 px divider gap, and start the lane path's [4, ROW_H/4 - 4] dash at the GRAPH edge.
     // ponytail: the path gap is 3.25 rather than 3 px; align the periods if the difference becomes visible.
-    const dashTo = (c) => h_flex().flex_1().min_w(4).h(2).gap(3).pr(3).justify_end().overflow_hidden().children(Array.from({ length: 60 }, () => div().flex_none().w(4).h(2).bg(c)));
+    // One dashed path rather than 60 dash elements: a frame's cost in herdr is mostly the elements it creates.
+    // End-justified like the 60 dashes were (an absolute .right() box lands at the left edge in herdr, see shadowEdge).
+    const dashTo = (c) => h_flex().flex_1().min_w(4).h(2).justify_end().overflow_hidden()
+      .child(paint_path(dashRun(), c).flex_none().w(DASH_RUN).h(2));
     const dashGap = (c) => div().w(7).flex_none().h_full().flex().items_center().child(div().w(4).h(2).bg(c));
     const wipRow = (r, w, c, i) => {
       const on = r.commit === this.sel;
       const mark = w.current ? "✏ " : "🌲 ", name = w.branch ?? `detached ${w.head.slice(0, 7)}`;
-const dashes = dashTo(c);
+      const dashes = dashTo(c);
       return h_flex().w_full().h(ROW_H).flex_none().items_center().overflow_hidden().relative().bg(alpha(c, on ? selA : WIP_A[dark ? "dark" : "light"]))
         .child(div().absolute().left(0).top(0).bottom(0).w(on ? SEL_BAR : 2).bg(c))
         .child(h_flex().w(wB).flex_none().h_full().items_center().overflow_hidden().pl(10).gap(4)
@@ -752,18 +760,16 @@ const dashes = dashTo(c);
           .child(this.label({ name: mark + name, kind: "wip" }, c, t))
           .child(dashes))
         .child(dashGap(c))
-        .child(div().w(wG).flex_none().h_full().overflow_hidden().relative()
-          .child(div().relative().left(-sx).w(cellW(lanes)).h_full().child(laneCell(r, { lanes, palette, connectFrom: sx, cache: this.lanePaths, index: i }))))
-        .child(div().w(7).flex_none())
-        .child(div().flex_1().min_w(0).truncate().text_sm().text_color(dim).child(`// WIP — ${w.n} change${w.n === 1 ? "" : "s"}`))
-        .child(div().w(7).flex_none())
+        .child(div().w(wG).flex_none().mr(7).h_full().overflow_hidden().relative() // mr, not spacer divs: rows pay per element
+          .child(laneCell(r, { lanes, palette, connectFrom: sx, cache: this.lanePaths, index: i, view }).left(-sx)))
+        .child(div().flex_1().min_w(0).mr(7).truncate().text_sm().text_color(dim).child(`// WIP — ${w.n} change${w.n === 1 ? "" : "s"}`))
         .child(h_flex().flex_none().mr(10).gap(6).text_sm().font_semibold()
           .children(w.add == null ? [] : [div().text_color(t.ansi2 ?? fg).child(`+${w.add}`), div().text_color(t.ansi1 ?? fg).child(`-${w.del}`)]));
     };
     // A stash row: the stash colour (palette slot STASH_C, see buildGraph), inbox icon + stash@{n}, dashed to its base, the message, its age.
     const stashRow = (r, x, c, i) => {
       const on = r.commit === this.sel;
-const dashes = dashTo(c);
+      const dashes = dashTo(c);
       return h_flex().w_full().h(ROW_H).flex_none().items_center().overflow_hidden().relative().when(on, (e) => e.bg(alpha(c, selA)))
         .children(on ? [div().absolute().left(0).top(0).bottom(0).w(SEL_BAR).bg(c)] : [])
         .child(h_flex().w(wB).flex_none().h_full().items_center().overflow_hidden().pl(10).gap(4)
@@ -772,13 +778,10 @@ const dashes = dashTo(c);
             .child(svg("mods/git-grapher/icons/inbox.svg").size(13).flex_none().text_color(t.foreground)).child(div().truncate().child(x.ref)))
           .child(dashes))
         .child(dashGap(c))
-        .child(div().w(wG).flex_none().h_full().overflow_hidden().relative()
-          .child(div().relative().left(-sx).w(cellW(lanes)).h_full().child(laneCell(r, { lanes, palette, connectFrom: sx, cache: this.lanePaths, index: i }))))
-        .child(div().w(7).flex_none())
+        .child(div().w(wG).flex_none().mr(7).h_full().overflow_hidden().relative()
+          .child(laneCell(r, { lanes, palette, connectFrom: sx, cache: this.lanePaths, index: i, view }).left(-sx)))
         .child(div().flex_1().min_w(0).truncate().text_sm().text_color(dim).child(x.msg))
-        .child(div().w(7).flex_none())
-        .child(div().w(wA).flex_none())
-        .child(div().w(44).flex_none().mr(10).text_right().text_sm().text_color(dim).child(ago(x.at)));
+        .child(div().w(44).flex_none().ml(7 + wA).mr(10).text_right().text_sm().text_color(dim).child(ago(x.at)));
     };
     const row = (r, i) => {
       const m = this.meta[i], c = palette[r.color % palette.length];
@@ -798,21 +801,18 @@ const dashes = dashTo(c);
           .children(refs ? refs.map((x) => this.label(x, c, t, r.commit)) : [])
           // connector from the last label to the column edge (continues inside GRAPH)
           .children(refs ? [div().flex_1().min_w(4).ml(-4).h(2).bg(c)] : [])) // ml -4: cancels the gap, so the line meets the label
-        .child(div().w(7).flex_none().h_full().children(refs ? [div().mt(ROW_H / 2 - 1).h(2).bg(c)] : []))
-        .child(div().w(wG).flex_none().h_full().overflow_hidden()
+        .children(refs ? [div().w(7).flex_none().h_full().child(div().mt(ROW_H / 2 - 1).h(2).bg(c))] : [])
+        .child(div().w(wG).flex_none().when(!refs, (el) => el.ml(7)).mr(7).h_full().overflow_hidden()
           .relative()
           // Band first = painted under the lane cell (lines, then node). Not inside the scrolled div: it never moves.
           .child(div().absolute().left(BAND.inset).right(BAND.inset).top((ROW_H - BAND.h) / 2).h(BAND.h).rounded(BAND.r).bg(alpha(c, bandA)))
-          .child(div().relative().left(-sx).w(cellW(lanes)).h_full()
-            .child(laneCell(cellRow, { lanes, palette, connectFrom: refs ? sx : undefined, cache: this.lanePaths, index: i })))
+          .child(laneCell(cellRow, { lanes, palette, connectFrom: refs ? sx : undefined, cache: this.lanePaths, index: i, view }).left(-sx))
           // Edge treatment: a node scrolled out of the column leaves a half dot on that edge.
           .children(X(r.lane) + AV / 2 <= sx ? [div().absolute().left(-5).top(ROW_H / 2 - 5).size(10).rounded_full().bg(c)]
             : X(r.lane) - AV / 2 >= sx + wG ? [div().absolute().right(-5).top(ROW_H / 2 - 5).size(10).rounded_full().bg(c)] : []))
-        .child(div().w(7).flex_none())
         .when(!faceNode, (el) => el.child(face.file ? image(face.file).size(16).rounded_full().flex_none().mr(6)
           : div().size(16).flex_none().mr(6).rounded_full().bg(face.tint).flex().items_center().justify_center().text_size(9).text_color("#ffffff").child(face.initial)))
-        .child(div().flex_1().min_w(0).truncate().text_sm().child(r.subject ?? ""))
-        .child(div().w(7).flex_none()) // under the MESSAGE | AUTHOR divider
+        .child(div().flex_1().min_w(0).mr(7).truncate().text_sm().child(r.subject ?? "")) // mr: under the MESSAGE | AUTHOR divider
         .child(div().w(wA).flex_none().truncate().text_sm().text_color(dim).child(m.an))
         .child(div().w(44).flex_none().mr(10).text_right().text_sm().text_color(dim).child(ago(m.at)));
     };

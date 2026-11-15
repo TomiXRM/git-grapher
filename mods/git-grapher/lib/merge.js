@@ -1,6 +1,6 @@
 // Plan merges from git state, then re-read and refuse if the plan's basis changed.
 // Leave native conflict state (MERGE_HEAD and index stages) for Conflict Mode.
-// No herdr dependency; ad is core.js's { run, testPath } adapter.
+// No herdr dependency; ad is core.js's { run, testPaths } adapter.
 import { READ } from "./core.js";
 
 const lines = (s) => s.split("\n").filter(Boolean);
@@ -97,12 +97,12 @@ async function nameStatus(rd, a, b) {
 }
 
 // merge / rebase / cherry-pick / revert in progress, from git's own files (the names core.js's inProgress reads).
-export async function stateFiles({ run, testPath }, cwd) {
+export async function stateFiles({ run, testPaths }, cwd) {
   const names = [["merge", "MERGE_HEAD"], ["rebase", "rebase-merge"], ["rebase", "rebase-apply"], ["cherry-pick", "CHERRY_PICK_HEAD"], ["revert", "REVERT_HEAD"]];
   const r = await run([...READ, "rev-parse", "--path-format=absolute", ...names.flatMap(([, f]) => ["--git-path", f])], { cwd });
   if (r.code !== 0) return [];
   const paths = lines(r.stdout);
-  const here = await Promise.all(paths.map((p) => testPath(p, { cwd })));
+  const here = await testPaths(paths, { cwd });
   return names.filter((_, i) => here[i]).map(([k]) => k);
 }
 

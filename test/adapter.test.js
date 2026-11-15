@@ -24,7 +24,7 @@ for (const poisonKey of [...UNSET, null]) for (const [method, invoke, expected] 
   const calls = [], on = { machine: "fixture" }, cwd = "/requested";
   const adapter = herdrAdapter(async (cmd, args, options) => { calls.push({ cmd, args, options }); return { code: 0, stdout: "bytes\n", stderr: "" }; }, on);
   await adapter.run(["status"], { cwd }); await adapter.sh("git status", [], { cwd });
-  assert.equal(await adapter.readFile("-file", { cwd }), "bytes\n"); assert.equal(await adapter.testPath("-file", { cwd }), true);
+  assert.equal(await adapter.readFile("-file", { cwd }), "bytes\n"); await adapter.testPaths(["-file"], { cwd });
   for (const call of calls) assert.deepEqual(call.options, { cwd, on });
   for (const { args } of calls.slice(0, 2)) {
     for (const key of UNSET) { const i = args.indexOf(key); assert.ok(i > 0); assert.equal(args[i - 1], "-u"); }
@@ -32,5 +32,5 @@ for (const poisonKey of [...UNSET, null]) for (const [method, invoke, expected] 
     assert.equal(args.some(x => x.startsWith("core.sshCommand=")), false);
   }
   assert.ok(calls[0].args.includes("credential.interactive=false"));
-  assert.deepEqual(calls[2].args, ["--", "-file"]); assert.deepEqual(calls[3].args, ["-e", "-file"]);
+  assert.deepEqual(calls[2].args, ["--", "-file"]); assert.deepEqual(calls[3].args.slice(2), ["sh", "-file"]);
 });

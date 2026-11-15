@@ -1,7 +1,7 @@
 // Conflict state comes from git on each read: MERGE_HEAD, rebase-merge, CHERRY_PICK_HEAD or REVERT_HEAD identify
 // the operation; ls-files -u identifies unmerged files; MERGE_MSG's conflicts list identifies saved files.
 // The view retains only unsaved Result text. Each write rechecks a fingerprint of the operation files and refuses stale state.
-// Use Current / Incoming for side labels. ad is core.js's adapter: { run, testPath, readFile, writeFile }.
+// Use Current / Incoming for side labels. ad is core.js's adapter: { run, testPaths, readFile, writeFile }.
 import { READ } from "./core.js";
 import { stateFiles, parseMergeTree } from "./merge.js";
 

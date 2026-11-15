@@ -8,8 +8,8 @@ export class LanePathCache {
   constructor({ margin = 32, limit = 256 } = {}) {
     this.margin = margin; this.limit = Math.max(1, limit); this.entries = new Map(); this.context = null;
   }
-  configure(generation, zoom) {
-    const key = JSON.stringify([generation, zoom]);
+  configure(generation, zoom, view = null) { // view: the lanes drawn (laneWindow); a horizontal scroll moves it
+    const key = JSON.stringify([generation, zoom, view]);
     if (key !== this.context) { this.clear(); this.context = key; }
   }
   clear() { this.entries.clear(); }
