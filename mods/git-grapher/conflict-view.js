@@ -74,11 +74,15 @@ export class ConflictView {
     }
     if (!this.sel || !files.has(this.sel)) this.sel = c.files.find((f) => !f.saved)?.path ?? c.files[0]?.path ?? null;
     if (c.op === "merge" && this.msgFor !== c.mergeHead) { this.msgFor = c.mergeHead; this.msg.set_value(C.mergeMessage(c.msg)); } // once per MERGE_HEAD
+    // A side panel may rebind to another space during these awaits: the old binding stops, and touches only its own draft.
+    const gen = this.gv.gen, ad = this.ad, root = this.root;
     await this.ensure(cx);
+    if (this.gv.gen !== gen) return;
     // The open file changed on disk (an editor, an AI): untouched drafts follow it; a touched one is flagged (Save refuses).
     const d = this.drafts.get(this.sel);
     if (d && !d.loading) {
-      const r = await this.ad.run(["hash-object", "--", d.file.path], { cwd: this.root }).catch(() => null);
+      const r = await ad.run(["hash-object", "--", d.file.path], { cwd: root }).catch(() => null);
+      if (this.gv.gen !== gen || this.drafts.get(d.file.path) !== d) return;
       const id = r?.code === 0 ? r.stdout.trim() : null;
       if (id && id !== d.f.workId) { if (this.touched(d)) d.changed = true; else { this.drop(d.file.path); await this.ensure(cx); } }
     }

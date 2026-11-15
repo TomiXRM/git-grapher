@@ -448,6 +448,19 @@ test("conflict view: a read or Commit merge that outlives a rebind is dropped", 
   assert.deepEqual([applied, written, cv.reading], [[], [], false]);
 });
 
+// Applying a conflict checks the open draft's file on disk (hash-object) before following it. If the panel rebinds
+// meanwhile and B has a draft at the same path, A's late result must not drop B's draft.
+test("conflict view: a disk check that outlives a rebind leaves the new binding's draft alone", async () => {
+  const hash = deferred(), ConflictView = load("conflict-view.js", "ConflictView");
+  const gv = { gen: 1, st: { adapter: { run: () => hash.promise }, state: { root: "/A" } } }, file = { path: "x.txt", e: {} };
+  const draftA = { file, f: { workId: "old" }, choices: [] }, draftB = { file, f: { workId: "b" }, choices: [] };
+  const cv = Object.assign(Object.create(ConflictView.prototype), { gv, c: { op: "rebase", files: [file] }, sel: "x.txt", drafts: new Map([["x.txt", draftA]]) });
+  const done = cv.apply({ op: "rebase", files: [file] }, cx);
+  await tick(); gv.gen = 2; cv.drafts = new Map([["x.txt", draftB]]); // the panel moved to B, which opened the same path
+  hash.resolve({ code: 0, stdout: "changed\n" }); await done;
+  assert.equal(cv.drafts.get("x.txt"), draftB);
+});
+
 // A Pull reads its preview before it queues: the graph moving meanwhile (during the fetch it waits for, or the preview's
 // own git reads) must drop it, not queue it on the new repository or show the old prediction there.
 test("a Pull whose preview outlives a space switch is dropped, not queued on the new repository", async () => {
