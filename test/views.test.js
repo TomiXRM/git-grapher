@@ -361,3 +361,32 @@ test("pull: no basis to compare (no upstream / detached / unborn, 'Pull anyway')
     assert.equal(r.reason === "stale" ? "stale" : pulled ? "pull" : "none", want, `${basisStr} ${code}`);
   }
 });
+
+// Multi-select: ⌘ toggles (seeding with the row already selected), ⇧ picks commit rows only, picked() keeps graph order.
+test("picks: ⌘ toggles from the selected row, ⇧ picks a range without WIP or stash rows, newest first", () => {
+  const GraphView = load("graph.js", "GraphView");
+  const gv = Object.create(GraphView.prototype), ids = ["wip", "c1", "c2", "st", "c3", "c4"];
+  Object.assign(gv, { sel: "c1", picks: new Set(), pickFrom: null, select(sha) { this.sel = sha; },
+    graph: { rows: ids.map((commit) => ({ commit, subject: commit, node: commit === "c3" ? "merge" : "commit" })) },
+    meta: ids.map((id) => ({ wip: id === "wip" ? {} : null, stash: id === "st" ? {} : null })) });
+  gv.pick("c3", { shift: false }, cx);
+  assert.deepEqual([...gv.picks].sort(), ["c1", "c3"]); assert.equal(gv.sel, "c3");
+  gv.pick("c3", { shift: false }, cx);
+  assert.deepEqual([...gv.picks], ["c1"]); assert.equal(gv.sel, "c1", "unpicking the shown row shows another pick");
+  gv.pick("wip", { shift: false }, cx); gv.pick("st", { shift: false }, cx);
+  assert.deepEqual([...gv.picks], ["c1"], "WIP and stash rows are never picked");
+  gv.pickFrom = "c1"; gv.pick("c4", { shift: true }, cx);
+  assert.deepEqual(gv.picked().map((c) => [c.sha, c.merge]), [["c1", false], ["c2", false], ["c3", true], ["c4", false]]);
+});
+
+// The dialog's OK hands the commits, newest first, to the matching core call; core applies the order.
+test("revert / cherry-pick dialogs: OK sends the listed commits to the matching core call", async () => {
+  const Header = load("header.js", "Header");
+  for (const kind of ["cherry-pick", "revert"]) {
+    const calls = [], hd = Object.create(Header.prototype);
+    Object.assign(hd, { t: { root: "/r" }, op: (name, fn) => calls.push([name, fn()]), dialog: { kind, list: [{ sha: "c" }, { sha: "b" }] },
+      g: { cherryPick: (_t, shas) => ["cherryPick", shas], revert: (_t, shas) => ["revert", shas] } });
+    hd.confirmed(cx);
+    assert.deepEqual(calls, [[kind, [kind === "revert" ? "revert" : "cherryPick", ["c", "b"]]]]); assert.equal(hd.dialog, null);
+  }
+});

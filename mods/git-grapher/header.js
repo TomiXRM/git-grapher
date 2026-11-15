@@ -7,7 +7,7 @@
 import { Input, div, h_flex, svg, v_flex } from "./ui/zoom.js";
 import { Popup, InputState } from "gpui-base";
 import { exec, settings, pickFolder } from "herdr";
-import { createGgit, herdrAdapter } from "./lib/core.js";
+import { createGgit, herdrAdapter, applyOrder } from "./lib/core.js";
 import { previewPull } from "./lib/preview-pull.js";
 import { mergePlan, runMerge, shortName } from "./lib/merge.js";
 import { modal, modalButton, modalCheck, modalField } from "./modal.js";
@@ -34,7 +34,7 @@ const stateText = (s) => STATE_TEXT[s.kind] ?? `A ${s.kind} is in progress. Pull
 // Shell-quoted for a command shown to copy (a legal branch name can hold; or $).
 const q = (s) => (/^[\w./@:+-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
 const first = (s) => (s || "").split("\n").find((l) => /^(error|fatal):/.test(l)) ?? (s || "").split("\n").find(Boolean) ?? "";
-const BUSY = { worktree: "Creating the worktree…", revert: "Reverting…", checkout: "Checking out…", pull: "Pulling…", preview: "Checking what the pull will do…", push: "Pushing…", stash: "Stashing…", pop: "Popping the stash…",
+const BUSY = { worktree: "Creating the worktree…", revert: "Reverting…", "cherry-pick": "Cherry-picking…", checkout: "Checking out…", pull: "Pulling…", preview: "Checking what the pull will do…", push: "Pushing…", stash: "Stashing…", pop: "Popping the stash…",
   branch: "Creating the branch…", fetch: "Fetching…", switch: "Switching…",
   apply: "Applying the stash…", drop: "Dropping the stash…",
   rename: "Renaming the branch…", tag: "Creating the tag…", "fetch-branch": "Fetching the branch…", "delete-remote": "Deleting on the remote…", upstream: "Setting the upstream…", "delete-branch": "Deleting the branch…", "push-tag": "Pushing the tag…",
@@ -77,8 +77,11 @@ function resultText(r) {
     case "wt-lock": return r.outcome === "completed" ? "Done" : `Could not change the lock: ${err}`;
     case "wt-prune": return r.outcome === "completed" ? "Pruned stale worktrees" : `Prune failed: ${err}`;
     case "wt-repair": return r.outcome === "completed" ? "Repaired worktrees" : `Repair failed: ${err}`;
-    case "revert": return r.outcome === "completed" ? "Reverted" : r.outcome === "conflict" ? `Revert stopped: ${r.unmerged} unresolved file(s)`
-      : r.reason === "merge-commit" ? "Merge commits are not reverted here" : r.outcome === "noop" ? "Nothing to revert" : `Revert failed: ${err}`;
+    case "revert": case "cherry-pick": {
+      const done = r.operation === "revert" ? "Reverted" : "Cherry-picked", verb = r.operation === "revert" ? "Revert" : "Cherry-pick";
+      return r.outcome === "completed" ? `${done}${r.n > 1 ? ` ${r.n} commits` : ""}` : r.outcome === "conflict" ? `${verb} stopped: ${r.unmerged} unresolved file(s)`
+        : r.reason === "merge-commit" ? `Merge commits are not ${done.toLowerCase()} here` : r.outcome === "noop" ? `Nothing to ${verb.toLowerCase()}` : `${verb} failed: ${err}`;
+    }
     case "switch": return r.outcome === "completed" ? `Switched to ${r.branch ?? r.name}${r.stashed ? " (your changes are in the stash: Pop brings them back)" : ""}` : `Switch refused: ${err}`;
     case "sync": return r.outcome === "completed" ? (r.made ? `Made ${r.branch}, tracking ${r.name}` : r.ff ? `${r.branch} fast-forwarded to ${r.name}` : `Switched to ${r.branch} (up to date with ${r.name})`)
       : `Not updated: ${err}`;
@@ -356,13 +359,14 @@ export class Header {
     this.dialog = null;
     this.op("worktree", () => this.g.worktreeAdd(this.t, path, { branch, from }), cx);
   }
-  // Revert / detached checkout ask first (they change the branch or the working tree).
-  // The revert / checkout dialog's OK: its button only.
+  // Revert / cherry-pick / detached checkout ask first (they change the branch or the working tree).
+  // The dialog's OK: its button only.
   confirmed(cx) {
     const d = this.dialog;
-    if (d?.kind !== "revert" && d?.kind !== "checkout") return;
+    if (!["revert", "cherry-pick", "checkout"].includes(d?.kind)) return;
     this.dialog = null;
-    this.op(d.kind, () => (d.kind === "revert" ? this.g.revert(this.t, d.sha) : this.g.checkoutDetached(this.t, d.sha)), cx);
+    const shas = d.list?.map((c) => c.sha);
+    this.op(d.kind, () => (d.kind === "revert" ? this.g.revert(this.t, shas) : d.kind === "cherry-pick" ? this.g.cherryPick(this.t, shas) : this.g.checkoutDetached(this.t, d.sha)), cx);
   }
   // Branch deletion asks once when no unique commits are lost, otherwise again naming commits backed up under
   // refs/ggit/deleted/. Tag creation shows its commit; pushing a tag names the target and remote.
@@ -421,6 +425,8 @@ export class Header {
   // removing a worktree asks first (its files go; the branch too when asked). Its own button only.
   confirmRemove(cx, w, withBranch) { this.dialog = { kind: "wt-remove", w, withBranch }; this.menu = null; cx.notify(); }
   confirm(cx, kind, at) { this.dialog = { kind, sha: at.sha, head: { oid: at.sha.slice(0, 7), subject: at.subject } }; this.menu = null; cx.notify(); }
+  // Revert / cherry-pick: commits newest first (graph order); the dialog lists them in the order git runs them.
+  confirmApply(cx, kind, newestFirst) { this.dialog = { kind, list: newestFirst }; this.menu = null; cx.notify(); }
   // A small "done" card for menu actions that are not git writes.
   note(cx, text) { this.setSnack(cx, { busy: null, r: { operation: "note", outcome: "completed", text, commands: [] } }); }
 
@@ -636,12 +642,15 @@ export class Header {
           cx.spawn(async (cx) => { await cx.sleep(0); this.nameInput.focus(); }); }),
           modalButton(t, "dlg-ok", "Check out", (cx) => this.confirmed(cx), { primary: true })] })];
     }
-    if (d.kind === "revert" || d.kind === "checkout") {
-      const rv = d.kind === "revert";
-      return [modal(t, { icon: ICON(rv ? "undo" : "git-commit"), color: rv ? warn : t.ansi4, title: rv ? "Revert this commit" : "Check out this commit", paneW,
-        subtitle: fromLine(t, d.head, rv ? "Commit" : "At"),
-        body: [div().child(rv ? `Adds a new commit on ${h?.branch ?? "HEAD"} that undoes it.` : "HEAD will be detached; your branches do not move.")],
-        actions: [cancel, modalButton(t, "dlg-ok", rv ? "Revert" : "Check out", (cx) => this.confirmed(cx), { primary: true })] })];
+    if (d.kind === "revert" || d.kind === "cherry-pick") {
+      const rv = d.kind === "revert", n = d.list.length, run = applyOrder(d.kind, d.list), SHOWN = 8;
+      const what = n === 1 ? "this commit" : `${n} commits`;
+      return [modal(t, { icon: ICON(rv ? "undo" : "git-commit"), color: rv ? warn : t.ansi4, title: `${rv ? "Revert" : "Cherry-pick"} ${what}`, paneW,
+        body: [div().whitespace_normal().child(rv ? `Adds ${n === 1 ? "a new commit" : `${n} new commits`} on ${h?.branch ?? "HEAD"} that undo${n === 1 ? "es" : ""} ${n === 1 ? "it" : "them, newest first"}.`
+            : `Applies ${n === 1 ? "it" : "them, oldest first,"} on ${h?.branch ?? "HEAD"}. Commits already there are skipped.`),
+          ...run.slice(0, SHOWN).map((c, i) => fromLine(t, { oid: c.sha.slice(0, 7), subject: c.subject }, n === 1 ? "Commit" : `${i + 1}.`)),
+          ...(n > SHOWN ? [div().text_size(12).text_color(t.muted ?? warn).child(`…and ${n - SHOWN} more`)] : [])],
+        actions: [cancel, modalButton(t, "dlg-ok", rv ? "Revert" : "Cherry-pick", (cx) => this.confirmed(cx), { primary: true })] })];
     }
     if (d.kind === "drop") {
       return [modal(t, { icon: ICON("trash"), color: t.ansi1 ?? warn, title: `Drop ${d.x.ref ?? "the stash"}`, paneW,
