@@ -17,9 +17,11 @@ function harness() {
     watchFolder: () => stopped ? Promise.reject(stop) : new Promise((resolve, reject) => { watcher = { resolve, reject }; }),
   };
   const drive = loadView("drive.js", "drive", host);
-  const store = { state: { root: "/r", worktrees: [], sig: "s", pending: 0 }, refresh() { events.refreshes++; }, on() {} };
-  return { shared, events, start: () => drive(store, { pollMs: 1e9 }, cx),
-    async batch() { assert.ok(watcher, "watch is waiting"); const w = watcher; watcher = null; w.resolve(["/r/src/a.js"]); await tick(); },
+  // check-ignore: the files under /r/node_modules/ are ignored. adapter.gate, when set, holds its answer.
+  const adapter = { gate: null, run: async (args) => { await adapter.gate; const out = args.filter((a) => a.startsWith("/r/node_modules/")); return { code: out.length ? 0 : 1, stdout: out.map((p) => p + "\n").join("") }; } };
+  const store = { state: { root: "/r", worktrees: [], sig: "s", pending: 0 }, adapter, reads: [], refresh(only) { events.refreshes++; this.reads.push(only ?? "all"); }, on() {} };
+  return { shared, events, store, start: () => drive(store, { pollMs: 1e9 }, cx),
+    async batch(paths = ["/r/src/a.js"]) { assert.ok(watcher, "watch is waiting"); const w = watcher; watcher = null; w.resolve(paths); await tick(); },
     async advance(ms) {
       const end = now + ms;
       for (;;) {
@@ -57,4 +59,26 @@ test("relevant: git-lfs's .git/lfs/tmp files from our own reads are not a change
   const relevant = loadView("drive.js", "relevant");
   assert.equal(relevant(["/r/.git/lfs/tmp/123"], "/r"), false);
   assert.equal(relevant(["/r/.git/lfs/tmp/123", "/r/a.txt"], "/r"), true);
+});
+
+// A worktree's own files read only that worktree; .git reads everything; files git ignores read nothing.
+test("drive: a batch's scope picks the read", async t => {
+  const h = harness(); t.after(() => h.dispose()); h.start();
+  await h.batch(["/r/src/a.js"]); await h.advance(300);
+  await h.batch(["/r/node_modules/x/a.js", "/r/node_modules/y"]); await h.advance(300);
+  await h.batch(["/r/node_modules/x/a.js", "/r/b.js"]); await h.advance(300);
+  await h.batch(["/r/.git/refs/heads/main", "/r/c.js"]); await h.advance(300);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.store.reads)), [["/r"], ["/r"], "all"]);
+  assert.equal(h.events.stamps, 3, "an ignored-only batch tells no other copy");
+});
+
+// A real change arriving while an ignored-only flush waits on check-ignore still tells the other copies.
+test("drive: an ignored-only flush does not swallow a later batch's stamp", async t => {
+  const h = harness(); t.after(() => h.dispose()); h.start();
+  let open; h.store.adapter.gate = new Promise((r) => { open = r; });
+  await h.batch(["/r/node_modules/x/a.js"]); await h.advance(300); // waits on check-ignore
+  h.store.adapter.gate = null;
+  await h.batch(["/r/b.js"]); open(); await h.advance(300);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.store.reads)), [["/r"]]);
+  assert.equal(h.events.stamps, 1);
 });

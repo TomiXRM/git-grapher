@@ -1,6 +1,6 @@
 // Git operations with no herdr or Node dependency. The adapter supplies:
 //   run(args, {cwd}) -> Promise<{code, stdout, stderr}>; rejects on timeout or failure to start
-//   testPath(path, {cwd}) -> Promise<boolean> for POSIX test -e
+//   testPaths(paths, {cwd}) -> Promise<boolean[]> for POSIX test -e, all in one process
 //   readFile(path, {cwd}) / sh(script, args, {cwd}) for Conflict Mode
 // The adapter removes repository-selecting environment variables and disables interactive authentication.
 // See herdrAdapter below.
@@ -61,8 +61,9 @@ export function parseFetch(text) {
   }).filter((r) => r.ref);
 }
 
-export function createGgit({ run, testPath }) {
+export function createGgit({ run, testPaths }) {
   const git = (args, cwd) => run(args, { cwd });
+  const gitPaths = new Map(); // cwd → its state files' absolute paths: where the git directory is never changes
 
   async function version() {
     const r = await git(["version"]);
@@ -90,12 +91,14 @@ export function createGgit({ run, testPath }) {
   }
 
   async function inProgress(t) {
-    const args = [...READ, "rev-parse", "--path-format=absolute", ...STATES.flatMap(([, f]) => ["--git-path", f])];
-    const r = await git(args, t.root ?? t.gitDir);
-    if (r.code !== 0) return { ok: false, stderr: r.stderr.trim() };
-    const paths = lines(r.stdout);
-    // All checks at once (nine `test -e` one after another were the biggest part of a refresh in herdr).
-    const here = await Promise.all(paths.slice(0, STATES.length).map((p) => testPath(p, { cwd: t.root ?? t.gitDir })));
+    const cwd = t.root ?? t.gitDir;
+    if (!gitPaths.has(cwd)) {
+      const r = await git([...READ, "rev-parse", "--path-format=absolute", ...STATES.flatMap(([, f]) => ["--git-path", f])], cwd);
+      if (r.code !== 0) return { ok: false, stderr: r.stderr.trim() };
+      gitPaths.set(cwd, lines(r.stdout).slice(0, STATES.length));
+    }
+    // One process for every check: this runs on each refresh, and a call costs about 13 ms in herdr.
+    const here = await testPaths(gitPaths.get(cwd), { cwd });
     const found = [];
     for (let i = 0; i < STATES.length; i++) {
       const [kind, file, extra] = STATES[i];
@@ -485,7 +488,10 @@ export const UNSET = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_
 export function herdrAdapter(exec, on) {
   return {
     run: (args, { cwd }) => exec("env", [...UNSET.flatMap((v) => ["-u", v]), ...GIT_ENV, "git", "-c", "credential.interactive=false", ...args], { cwd, on }),
-    testPath: async (path, { cwd }) => (await exec("test", ["-e", path], { cwd, on })).code === 0,
+    testPaths: async (paths, { cwd }) => {
+      const r = await exec("sh", ["-c", 'for p; do if [ -e "$p" ]; then echo 1; else echo 0; fi; done', "sh", ...paths], { cwd, on });
+      return r.stdout.split("\n").slice(0, paths.length).map((x) => x === "1");
+    },
     // Mods have no fs access: read git state with cat and perform checked writes in one shell process to avoid a gap
     // between separate execs. exec has no stdin, so pass text as arguments.
     // ponytail: ARG_MAX limits total argv to roughly 1–2 MB; Linux also caps individual arguments at 128 KiB.

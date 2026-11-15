@@ -38,6 +38,20 @@ test("refresh: asks during a read coalesce into one more read; history re-read o
   await s.refresh(); assert.equal(logs, 2); assert.equal(s.state.history.commits[0].subject, "two");
 });
 
+test("refresh(only): reads only those worktrees' status, keeps the rest; a full ask in the same pass reads everything", async () => {
+  const d = repo(), w = d + "-wt"; sh(d, "worktree", "add", "-q", w);
+  const calls = [], counting = { ...adapter, run: async (args, o) => { calls.push(args.find((a) => /^[a-z][a-z-]+$/.test(a) && a !== "core.fsmonitor=false")); return exec(args, o); } };
+  const s = createStore(counting, d);
+  await s.refresh();
+  const [main, other] = s.state.worktrees;
+  writeFileSync(join(d, "f"), "2\n"); calls.length = 0;
+  await s.refresh([main.path]);
+  assert.deepEqual([...new Set(calls)].sort(), ["diff", "status"], "no refs, log, stash or worktree list");
+  assert.equal(s.state.worktrees[0].n, 1); assert.equal(s.state.worktrees[1], other); assert.equal(s.state.head.unstaged, 1);
+  calls.length = 0; await Promise.all([s.refresh([main.path]), s.refresh()]);
+  assert.ok(calls.includes("for-each-ref"));
+});
+
 test("write queue: writes run in order, none dropped, each ends with a refresh; a guess is settled only after", async () => {
   const d = repo(); for (const f of ["a", "b", "c"]) writeFileSync(join(d, f), f);
   const order = [];

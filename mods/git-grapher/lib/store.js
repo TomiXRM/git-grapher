@@ -1,8 +1,9 @@
 // Repository store shared by views within one mod copy. No herdr dependency; core.js supplies the adapter:
-// { run(args, {cwd}) -> {code, stdout, stderr}, testPath(path, {cwd}) }.
+// { run(args, {cwd}) -> {code, stdout, stderr}, testPaths(paths, {cwd}) }.
 //
 //   const s = createStore(adapter, root)
-//   s.refresh()                     resolves after a read started after this request finishes
+//   s.refresh(only?)                resolves after a read started after this request finishes; only: worktree paths
+//                                   whose own files changed (no .git change), so only their status is read again
 //   s.write(name, (g, t) => g.stage(t, paths))   queues a write and refreshes afterwards
 //   s.need(path, on)                 retains worktree staged / unstaged lists in s.state.wip
 //   s.on(fn) -> off                  reports applied reads and write starts / ends
@@ -50,7 +51,7 @@ export function createStore(adapter, root, { limit: first = LOG_LIMIT, more: ste
   const gate = limiter(MAX_GIT);
   const run = (args, cwd = root) => gate(() => adapter.run(args, { cwd })).catch((e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }));
   const read = (args, cwd) => run([...READ, ...args], cwd);
-  const g = createGgit({ run: (args, o) => gate(() => adapter.run(args, o)), testPath: adapter.testPath });
+  const g = createGgit({ run: (args, o) => gate(() => adapter.run(args, o)), testPaths: adapter.testPaths });
   const t = { root };
 
   const state = { gen: 0, basis: 0, root, sig: null, history: null, worktrees: [], head: null, states: [], stashes: [], wip: new Map(), pending: 0, error: null };
@@ -138,18 +139,31 @@ export function createStore(adapter, root, { limit: first = LOG_LIMIT, more: ste
     });
   }
 
-  // Serialize reads; a request during a read marks it dirty and schedules one more pass.
-  let running = null, dirty = false;
-  function refresh() {
-    if (running) { dirty = true; return running; } // Read once more before settling.
+  // Files changed in these worktrees and nothing under .git: refs, history, stashes and the other worktrees are as
+  // they were, so only these statuses are read (one or three git calls rather than the whole repository's thirty).
+  async function loadTrees(paths) {
+    const trees = await Promise.all(state.worktrees.map((w) => (paths.has(w.path) ? readWorktree(w) : w)));
+    const wip = new Map(state.wip);
+    await Promise.all([...needed.keys()].filter((p) => paths.has(p)).map(async (p) => wip.set(p, await readWip(p))));
+    const me = trees.find((w) => w?.current);
+    Object.assign(state, { gen: state.gen + 1, error: null, worktrees: trees.filter(Boolean), head: me?.h ?? null, wip });
+  }
+
+  // Serialize reads; a request during a read is merged into one more pass. want: that pass, undefined when none is due,
+  // null to read everything, or the Set of worktrees to read again.
+  let running = null, want;
+  function refresh(only) {
+    const s = only ? new Set(only) : null;
+    want = want === undefined ? s : want && s ? new Set([...want, ...s]) : null;
+    if (running) return running; // Read once more before settling.
     // Clear running in the same step that exits the loop; a later finally() could let an intervening refresh
     // reuse a finished promise without starting a read. herdr can deliver multiple results before draining JS jobs.
     running = (async () => {
-      do {
-        dirty = false;
-        try { await load(); } catch (e) { state.error = String(e?.message ?? e); state.gen++; }
+      while (want !== undefined) {
+        const w = want; want = undefined;
+        try { await (w && state.sig !== null && !state.error ? loadTrees(w) : load()); } catch (e) { state.error = String(e?.message ?? e); state.gen++; }
         emit();
-      } while (dirty);
+      }
       running = null;
     })();
     return running;

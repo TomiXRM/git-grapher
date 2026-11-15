@@ -2,7 +2,8 @@
 // gpui-kit set_rem_size affects the whole window, so it cannot implement this setting.
 // Mods share a JS realm: leave native prototypes untouched and layer one wrapper prototype per native prototype
 // onto each element with Object.setPrototypeOf.
-// ponytail: setPrototypeOf runs per element; profile it if frames slow down before moving scaling into the host.
+// At 100% (the default) the layer would change nothing, so elements keep their native prototype: the layer and its
+// wrapper calls cost about half of an element's creation, measured in herdr.
 import * as kit from "gpui-kit";
 import * as base from "gpui-base";
 
@@ -32,7 +33,7 @@ function layer(p) {
   layered.set(p, z);
   return z;
 }
-const zz = (el) => { if (el && typeof el === "object") Object.setPrototypeOf(el, layer(Object.getPrototypeOf(el))); return el; };
+const zz = (el) => { if (Z !== 1 && el && typeof el === "object") Object.setPrototypeOf(el, layer(Object.getPrototypeOf(el))); return el; };
 const make = (f) => (...a) => zz(f(...a));
 
 export const div = make(kit.div), svg = make(kit.svg), image = make(kit.image), uniform_list = make(kit.uniform_list), list = make(kit.list);

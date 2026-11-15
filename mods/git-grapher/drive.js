@@ -13,19 +13,36 @@ const POLL = { local: 45_000, remote: 10_000 };
 // counting them made every read start the next one.
 const NOISE = /(\.lock$|\/objects\/|\/logs\/|\/\.git\/lfs\/|COMMIT_EDITMSG$|AUTO_MERGE$|\/FETCH_HEAD$)/;
 export const relevant = (batch, root) => batch.some((p) => p === root || !NOISE.test(p));
+const GIT = /\/\.git(\/|$)/;
 
 export function drive(store, { machine = null, pollMs = null } = {}, cx) {
   const root = store.state.root, bumpKey = "ggit.bump." + (machine ?? "") + ":" + root, me = Math.random().toString(36).slice(2);
   let last = 0, first = 0, armed = false, tell = false;
+  // The changes since the last read: worktree → its changed files, or null when anything else changed (.git, the
+  // others' bump, the poll), which reads everything.
+  let files = new Map();
   // Stamp the bump when the debounced read starts, at most once per 0.3–1 s rather than once per event batch.
-  const kick = (alsoTell = false) => {
+  const kick = (alsoTell = false, path = null, batch = null) => {
     last = Date.now(); tell ||= alsoTell;
+    if (files) { if (path) for (const p of batch) (files.get(path) ?? files.set(path, new Set()).get(path)).add(p); else files = null; }
     if (armed) return;
     armed = true; first = last;
     cx.spawn(async (cx) => {
       while (Date.now() - last < QUIET && Date.now() - first < MOST) await cx.sleep(50);
-      armed = false; if (tell) { tell = false; stamp(); } store.refresh();
+      // Take this flush's changes and tell flag together: batches arriving during check-ignore belong to the next flush.
+      armed = false; const f = files, t = tell; files = new Map(); tell = false;
+      const only = f && (await Promise.all([...f].map(async ([p, s]) => ((await ignored(p, [...s])) ? null : p)))).filter(Boolean);
+      if (only && !only.length) return; // only files git ignores (node_modules, build output): nothing shown changed
+      if (t) stamp();
+      store.refresh(only ?? undefined);
     });
+  };
+  // Whether git ignores every one of these files: one check-ignore rather than a read (a build or a dev server writes
+  // ignored files many times a second). Too many to pass as arguments: assume not.
+  const ignored = async (cwd, list) => {
+    if (list.length > 500) return false;
+    const r = await store.adapter.run(["-c", "core.quotePath=false", "check-ignore", "--", ...list], { cwd }).catch(() => null);
+    return r?.code === 0 && r.stdout.split("\n").filter(Boolean).length === list.length; // one line per ignored file
   };
 
   // Watches follow the worktree list: a loop per path, which ends when its path is no longer a worktree.
@@ -37,8 +54,9 @@ export function drive(store, { machine = null, pollMs = null } = {}, cx) {
       while (store.state.worktrees.some((w) => w.path === path) || path === root) {
         let batch;
         try { batch = await watchFolder(path); } catch { await cx.sleep(5000); continue; } // a deleted folder fails at once
-        if (relevant(batch, path)) kick(true); // Notify other copies too: herdr can deliver a path's batch only to its newest waiter, and worktree-only
+        // Notify other copies too: herdr can deliver a path's batch only to its newest waiter, and worktree-only
         // changes move no refs, so the subsequent read would not publish a bump on its own.
+        if (relevant(batch, path)) kick(true, batch.some((p) => p === path || GIT.test(p)) ? null : path, batch);
       }
       watching.delete(path);
     });

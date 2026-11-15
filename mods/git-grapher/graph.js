@@ -7,7 +7,7 @@
 // Optional props: repo, wB, wG, sx (initial horizontal scroll), top, sweep (performance run), light (light-theme preview),
 // select (initial row), walk (initial arrow-key steps), pollMs, motionMs, drawer ("bottom" | "right"), file (initial diff).
 import { gitRun } from "./run.js";
-import { div, h_flex, svg, v_flex, v_virtual_list, setZoom, image } from "./ui/zoom.js";
+import { div, h_flex, svg, v_flex, v_virtual_list, setZoom, image, paint_path, PathBuilder } from "./ui/zoom.js";
 
 import { VirtualListScrollHandle, InputState } from "gpui-base";
 import { rail as sideRail, panel as sidePanel } from "./sidebar.js";
@@ -46,6 +46,10 @@ const WIP_A = { dark: "40", light: "33" }; // WIP row tint: the whole row in its
 const SEL_A = { dark: "59", light: "66" }, SEL_BAR = 4; // The light selection tint must exceed its 4d band so it stands out from neighbouring rows.
 const lum = (c) => { const n = parseInt(c.slice(1, 7), 16); return ((n >> 16) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114) / 255; };
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+// The WIP / stash dashes: 4 on, 3 off, ending on a 3 px gap at the right. Built once per zoom; paths are immutable.
+const DASH_RUN = 60 * 7;
+let dashPath = null;
+const dashRun = () => (dashPath?.z === zoom() ? dashPath : (dashPath = { z: zoom(), p: PathBuilder.stroke(2).move_to(0, 1).line_to(DASH_RUN, 1).dash_array([4, 3]).build() })).p;
 // Drawer shares are draggable and retained per side, using the spring from ui/segmented.js.
 // Defaults: bottom graph/detail 6:4; right graph/detail 7:3. Apply the same shares after detaching via layout.resize
 // because pane.split has no size argument.
@@ -739,7 +743,9 @@ export class GraphView {
     // Align WIP / stash dashes across BRANCH and GRAPH: end on a 3 px gap at the column edge, fit one 4 + 3 period
     // in the 7 px divider gap, and start the lane path's [4, ROW_H/4 - 4] dash at the GRAPH edge.
     // ponytail: the path gap is 3.25 rather than 3 px; align the periods if the difference becomes visible.
-    const dashTo = (c) => h_flex().flex_1().min_w(4).h(2).gap(3).pr(3).justify_end().overflow_hidden().children(Array.from({ length: 60 }, () => div().flex_none().w(4).h(2).bg(c)));
+    // One dashed path rather than 60 dash elements: a frame's cost in herdr is mostly the elements it creates.
+    const dashTo = (c) => div().flex_1().min_w(4).h(2).relative().overflow_hidden()
+      .child(paint_path(dashRun(), c).absolute().right(0).top(0).w(DASH_RUN).h(2));
     const dashGap = (c) => div().w(7).flex_none().h_full().flex().items_center().child(div().w(4).h(2).bg(c));
     const wipRow = (r, w, c, i) => {
       const on = r.commit === this.sel;
