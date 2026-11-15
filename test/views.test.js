@@ -406,6 +406,20 @@ test("a write queued before a space switch is refused once it runs; nothing reac
   assert.deepEqual(results.map((r) => [r.operation, r.reason]), [["cherry-pick", "moved"], ["conflict-abort", "moved"]]);
 });
 
+// A switch already running on A that git refuses over local changes must not open "Stash and switch" once the graph is
+// on B: that dialog's action reads the current repository. The card still reports A's refusal.
+test("a switch refused after a space switch shows its card, not the stash-and-switch dialog", async () => {
+  const Header = load("header.js", "Header");
+  const block = deferred(), results = [];
+  const hd = Object.assign(Object.create(Header.prototype), { st: chain([]), dialog: null, setSnack: (_cx, s) => s.r && results.push(s.r) });
+  hd.op("switch", () => block.promise, cx);
+  await tick(); hd.st = chain([]); // the graph moved to B while git ran on A
+  block.resolve({ operation: "switch", outcome: "refused", name: "feat", stderr: "error: Your local changes would be overwritten by checkout:\n\ta.txt" });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(hd.dialog, null);
+  assert.deepEqual(results.map((r) => r.operation), ["switch"]);
+});
+
 // A Pull reads its preview before it queues: the graph moving meanwhile (during the fetch it waits for, or the preview's
 // own git reads) must drop it, not queue it on the new repository or show the old prediction there.
 test("a Pull whose preview outlives a space switch is dropped, not queued on the new repository", async () => {

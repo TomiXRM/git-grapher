@@ -290,8 +290,9 @@ export class Header {
         try { return await fn(); } finally { this.netRunning = false; }
       }).finally(() => { if (net) this.netQueued--; if (name === "pull") this.pulling = Math.max(0, (this.pulling ?? 0) - 1); });
       if (this.busy === name) this.busy = null;
-      // git refused to switch over local changes → the choice to stash them first, instead of a red card.
-      if (r?.operation === "switch" && r.outcome === "refused" && !r.stashed && /would be overwritten/.test(r.stderr ?? "")) {
+      // git refused to switch over local changes → the choice to stash them first, instead of a red card. Not once the
+      // graph moved to another repository: its "Stash and switch" would act there; the card still tells what happened.
+      if (this.st === st && r?.operation === "switch" && r.outcome === "refused" && !r.stashed && /would be overwritten/.test(r.stderr ?? "")) {
         this.snack = null; this.dialog = { kind: "switch-dirty", name: r.name, remote: r.remote, files: (r.stderr.match(/^\t(.+)$/gm) ?? []).map((l) => l.trim()) }; cx.notify(); return;
       }
       this.setSnack(cx, { busy: null, r });
