@@ -420,6 +420,34 @@ test("a switch refused after a space switch shows its card, not the stash-and-sw
   assert.deepEqual(results.map((r) => r.operation), ["switch"]);
 });
 
+// A side panel attaches again on each space switch, possibly to a store it had before. The earlier attach's auto-fetch
+// loop wakes on a cx that now throws: it must end before touching the header, or a stuck "fetching" blocks every fetch.
+test("header: an earlier attach's auto-fetch loop ends at a rebind, even to the same store", async () => {
+  const Header = load("header.js", "Header", { updateState: async () => ({}) });
+  const st = { g: {}, adapter: {}, state: { root: "/A", head: null, states: [], stashes: [], error: null } }, sleeps = [], fetched = [];
+  const c = { notify() {}, sleep: () => new Promise((r) => sleeps.push(r)), spawn(fn) { return Promise.resolve().then(() => fn(c)); } };
+  const hd = Object.assign(Object.create(Header.prototype), { p: {}, autoFetchOk: () => true, fetchTask: async () => { fetched.push(1); } });
+  hd.attach(st, c); await tick();
+  hd.bound = null; hd.attach(st, c); await tick(); // retarget, then back to the same store
+  sleeps[0](); await tick(); await tick();
+  assert.equal(fetched.length, 2, "the first loop woke and ended without fetching");
+});
+
+// Conflict Mode reads and Commit merge's checks await git. A rebind meanwhile drops the old binding's result: no conflict
+// from A shown on B, no commit queued, and B can start its own read.
+test("conflict view: a read or Commit merge that outlives a rebind is dropped", async () => {
+  const read = deferred(), check = deferred(), applied = [], written = [];
+  const C = { readConflict: () => read.promise, blockers: () => check.promise };
+  const ConflictView = load("conflict-view.js", "ConflictView", { C });
+  const gv = { gen: 1, st: { adapter: {}, state: { root: "/A" } } };
+  const cv = Object.assign(Object.create(ConflictView.prototype), { gv, c: { op: "merge" }, apply: async (x) => applied.push(x), write: (n) => written.push(n) });
+  cv.sync({ head: { unmerged: 1 }, states: [] }, cx);
+  const done = cv.finish(cx);
+  await tick(); gv.gen = 2; // the panel moved to another space
+  read.resolve({ rev: "A" }); check.resolve([]); await done; await tick(); await tick();
+  assert.deepEqual([applied, written, cv.reading], [[], [], false]);
+});
+
 // A Pull reads its preview before it queues: the graph moving meanwhile (during the fetch it waits for, or the preview's
 // own git reads) must drop it, not queue it on the new repository or show the old prediction there.
 test("a Pull whose preview outlives a space switch is dropped, not queued on the new repository", async () => {

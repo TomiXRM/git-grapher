@@ -158,8 +158,12 @@ export class GraphView {
     const space = spaces().find((s) => s.active)?.id;
     if (this.space !== undefined && space !== this.space && !this.p.repo) {
       this.gen = (this.gen ?? 0) + 1; // ends the old binding now, before the new one locates
-      Object.assign(this, { st: null, repo: null, graph: null, meta: [], refs: new Map(), files: new Map(), sel: null, ctx: null, restored: false, stats: "loading…" });
-      this.dv.store = null; Object.assign(this.hd, { st: null, h: null, states: [], name: "", dialog: null }); Object.assign(this.cv, { c: null, sel: null, drafts: new Map() });
+      // history / headId / wip / stashes too: a store coming back unchanged must still lay its graph out. origin: the pane
+      // the copy was opened from belongs to the old space. hist: an open File History is the old repository's.
+      Object.assign(this, { st: null, repo: null, graph: null, history: null, headId: null, wip: null, stashes: null, meta: [], refs: new Map(), files: new Map(),
+        sel: null, ctx: null, hist: null, origin: null, restored: false, stats: "loading…" });
+      this.dv.store = null; Object.assign(this.cv, { c: null, sel: null, drafts: new Map(), blocked: null, arm: null });
+      Object.assign(this.hd, { st: null, bound: null, h: null, states: [], name: "", dialog: null, fetching: false, lastFetch: null, fetchErr: null, autoStopped: false });
       cx.spawn(async (cx) => this.attach(cx));
     }
     this.space = space;

@@ -45,15 +45,20 @@ export class ConflictView {
   sync(s, cx) {
     const maybe = (s.head?.unmerged ?? 0) > 0 || s.states.some((x) => ["merge", "rebase", "cherry-pick", "revert"].includes(x.kind));
     if (!maybe && !this.c) return;
-    if (this.reading) { this.again = true; return; }
-    this.reading = true;
+    // reading: the binding (gv.gen) whose read runs. A side panel following the active space rebinds; the old binding's read
+    // then drops its result and leaves the new binding free to read.
+    const gen = this.gv.gen;
+    if (this.reading === gen) { this.again = true; return; }
+    this.reading = gen;
     cx.spawn(async (cx) => {
-      do {
-        this.again = false;
-        const c = maybe || this.c ? await C.readConflict(this.ad, this.root).catch(() => this.c) : null;
-        await this.apply(c, cx);
-      } while (this.again);
-      this.reading = false;
+      try {
+        do {
+          this.again = false;
+          const c = maybe || this.c ? await C.readConflict(this.ad, this.root).catch(() => this.c) : null;
+          if (this.gv.gen !== gen) return;
+          await this.apply(c, cx);
+        } while (this.again && this.gv.gen === gen);
+      } finally { if (this.reading === gen) this.reading = false; }
     });
   }
 
@@ -150,18 +155,21 @@ export class ConflictView {
   // The file as it was loaded goes along: a change made since refuses the take.
   take(f, side, cx) { const request = conflictTakeRequest(this.c, f, side, this.drafts.get(f.path)); this.write("conflict-take", () => C.takeSide(this.ad, this.root, request), cx); }
   async finish(cx) {
-    const c = this.c;
-    const b = await C.blockers(this.ad, this.root, c).catch(() => ["Could not check"]);
+    // The repository at the click: a side panel may move to another space during the checks below.
+    const c = this.c, gen = this.gv.gen, ad = this.ad, root = this.root;
+    const b = await C.blockers(ad, root, c).catch(() => ["Could not check"]);
+    if (this.gv.gen !== gen) return;
     this.blocked = b.length ? b : null; cx.notify();
     if (b.length) return;
     if (c.op === "merge") {
       const m = this.msg.value();
       // Capture the staged tree at the click; commitMerge commits only that tree for this merge.
-      const w = await this.ad.run(["write-tree"], { cwd: this.root }).catch(() => null);
+      const w = await ad.run(["write-tree"], { cwd: root }).catch(() => null);
+      if (this.gv.gen !== gen) return;
       const request = conflictMergeRequest(c, m, w);
       if (request.blocked) { this.blocked = [request.blocked]; cx.notify(); return; }
-      this.write("commit", () => C.commitMerge(this.ad, this.root, request.conflict, request.message, request.tree), cx);
-    } else this.write("conflict-continue", () => C.continueOp(this.ad, this.root, c), cx);
+      this.write("commit", () => C.commitMerge(ad, root, request.conflict, request.message, request.tree), cx);
+    } else this.write("conflict-continue", () => C.continueOp(ad, root, c), cx);
   }
   // Skip / Abort require a second confirmation tied to the revision on which they were armed.
   armed(k) { return this.arm?.k === k && this.arm.rev === this.c?.rev; }

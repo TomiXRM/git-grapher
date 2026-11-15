@@ -217,13 +217,16 @@ export class Header {
   }
 
   attach(store, cx) {
+    // bound: this attach's token. A side panel following the active space attaches again, even to a store it had before,
+    // and the earlier attach's tasks (on a cx that now throws) must end instead of touching the new binding's state.
+    const b = (this.bound = {});
     this.st = store; this.g = store.g; this.t = { ok: true, root: store.state.root }; this.ad = store.adapter;
     this.name = store.state.root.split("/").filter(Boolean).pop();
     this.sync(store.state);
     ({ branch: this.nameInput, worktree: this.pathInput, stash: this.msgInput })[this.p.dialog?.kind]?.focus(); // props.dialog: as if opened
     // once on open, then every minute while this pane lives; a failure stops it until a manual Fetch succeeds.
     // Not while writes wait or run: an auto fetch must not delay or overlap them (a pull or push in particular).
-    cx.spawn(async (cx) => { for (;;) { if (this.autoFetchOk()) await this.fetchTask(cx, true); await cx.sleep(AUTO_MS); } });
+    cx.spawn(async (cx) => { while (this.bound === b) { if (this.autoFetchOk()) await this.fetchTask(cx, true); await cx.sleep(AUTO_MS); } });
     this.checkUpdate(cx, false); // the gear's ↑ when a newer release exists (cached for a day)
   }
   // Settings → Updates. upd: { version, latest, available, helper, dev, busy?, text? }
@@ -250,20 +253,22 @@ export class Header {
   async fetchTask(cx, auto) {
     if (this.fetching || !this.h) return;
     if (auto && (this.netRunning || this.netQueued)) return;
+    const st = this.st, b = this.bound; // a side panel may move on meanwhile: this fetch's ending is then not the new binding's
     this.fetching = true; if (!auto) this.setSnack(cx, { busy: "fetch" }); cx.notify();
     // Fetch stays outside the write queue so its 30 s exec limit cannot block staging. It touches refs, not the index.
     // Network jobs cannot overlap: Pull / Push await an active fetch; a Fetch clicked during either queues behind it.
     let r;
     try {
       // A Pull / Push already queued counts as running: a Fetch slipping in before it would move the refs it was planned on.
-      const st = this.st, queued = !!(this.netRunning || this.netQueued), job = queued ? st.write("fetch", () => (this.st === st ? this.g.fetch(this.t, this.h) : moved("fetch"))) : this.g.fetch(this.t, this.h);
+      const queued = !!(this.netRunning || this.netQueued), job = queued ? st.write("fetch", () => (this.st === st ? this.g.fetch(this.t, this.h) : moved("fetch"))) : this.g.fetch(this.t, this.h);
       this.fetchJob = job.catch(() => null);
       // Pull / Push await only an outside-queue fetch. Waiting for a fetch queued behind them would deadlock
       // a Push -> Push -> Fetch sequence.
       if (!queued) this.freeFetch = this.fetchJob;
       r = await job;
     } catch (e) { r = { operation: "fetch", outcome: "unknown", reason: String(e?.message ?? e) }; } // a throw must not leave "fetching" set
-    finally { this.fetchJob = null; this.freeFetch = null; this.fetching = false; }
+    finally { if (this.bound === b) { this.fetchJob = null; this.freeFetch = null; this.fetching = false; } }
+    if (this.bound !== b) return;
     this.refresh();
     if (!auto) this.setSnack(cx, { busy: null, r }); // auto fetch stays quiet: its state is the status block
     if (r.outcome === "completed" || r.outcome === "noop") { this.lastFetch = new Date(); this.autoStopped = false; this.fetchErr = null; }
