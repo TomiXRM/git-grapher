@@ -45,15 +45,20 @@ export class ConflictView {
   sync(s, cx) {
     const maybe = (s.head?.unmerged ?? 0) > 0 || s.states.some((x) => ["merge", "rebase", "cherry-pick", "revert"].includes(x.kind));
     if (!maybe && !this.c) return;
-    if (this.reading) { this.again = true; return; }
-    this.reading = true;
+    // reading: the binding (gv.gen) whose read runs. A side panel following the active space rebinds; the old binding's read
+    // then drops its result and leaves the new binding free to read.
+    const gen = this.gv.gen;
+    if (this.reading === gen) { this.again = true; return; }
+    this.reading = gen;
     cx.spawn(async (cx) => {
-      do {
-        this.again = false;
-        const c = maybe || this.c ? await C.readConflict(this.ad, this.root).catch(() => this.c) : null;
-        await this.apply(c, cx);
-      } while (this.again);
-      this.reading = false;
+      try {
+        do {
+          this.again = false;
+          const c = maybe || this.c ? await C.readConflict(this.ad, this.root).catch(() => this.c) : null;
+          if (this.gv.gen !== gen) return;
+          await this.apply(c, cx);
+        } while (this.again && this.gv.gen === gen);
+      } finally { if (this.reading === gen) this.reading = false; }
     });
   }
 
@@ -69,11 +74,15 @@ export class ConflictView {
     }
     if (!this.sel || !files.has(this.sel)) this.sel = c.files.find((f) => !f.saved)?.path ?? c.files[0]?.path ?? null;
     if (c.op === "merge" && this.msgFor !== c.mergeHead) { this.msgFor = c.mergeHead; this.msg.set_value(C.mergeMessage(c.msg)); } // once per MERGE_HEAD
+    // A side panel may rebind to another space during these awaits: the old binding stops, and touches only its own draft.
+    const gen = this.gv.gen, ad = this.ad, root = this.root;
     await this.ensure(cx);
+    if (this.gv.gen !== gen) return;
     // The open file changed on disk (an editor, an AI): untouched drafts follow it; a touched one is flagged (Save refuses).
     const d = this.drafts.get(this.sel);
     if (d && !d.loading) {
-      const r = await this.ad.run(["hash-object", "--", d.file.path], { cwd: this.root }).catch(() => null);
+      const r = await ad.run(["hash-object", "--", d.file.path], { cwd: root }).catch(() => null);
+      if (this.gv.gen !== gen || this.drafts.get(d.file.path) !== d) return;
       const id = r?.code === 0 ? r.stdout.trim() : null;
       if (id && id !== d.f.workId) { if (this.touched(d)) d.changed = true; else { this.drop(d.file.path); await this.ensure(cx); } }
     }
@@ -134,10 +143,14 @@ export class ConflictView {
   }
   resetAll(d, cx) { d.choices = []; d.ed.set_value(d.f.merged); this.arm = null; cx.notify(); }
 
-  // ---- writes: all through the store's one queue; the result is a snackbar card (header.js).
+  // ---- writes: all through the store's one queue; the result is a snackbar card (header.js). fn reads this.ad / this.root
+  // when it runs, so a write still waiting when the graph moves to another repository is refused (as Header.op does).
   write(name, fn, cx) {
-    const hd = this.gv.hd; hd.busy = name; hd.setSnack(cx, { busy: name });
-    cx.spawn(async (cx) => { const r = await this.st.write(name, fn); if (hd.busy === name) hd.busy = null; hd.setSnack(cx, { busy: null, r }); this.sync(this.st.state, cx); });
+    const hd = this.gv.hd, st = this.st; hd.busy = name; hd.setSnack(cx, { busy: name });
+    cx.spawn(async (cx) => {
+      const r = await st.write(name, () => (this.st === st ? fn() : { operation: name, outcome: "refused", reason: "moved", stderr: "The graph switched to another repository before this ran." }));
+      if (hd.busy === name) hd.busy = null; hd.setSnack(cx, { busy: null, r }); if (this.st === st) this.sync(st.state, cx);
+    });
   }
   save(d, cx) {
     const request = conflictSaveRequest(this.c, d, d.ed.value());
@@ -146,18 +159,21 @@ export class ConflictView {
   // The file as it was loaded goes along: a change made since refuses the take.
   take(f, side, cx) { const request = conflictTakeRequest(this.c, f, side, this.drafts.get(f.path)); this.write("conflict-take", () => C.takeSide(this.ad, this.root, request), cx); }
   async finish(cx) {
-    const c = this.c;
-    const b = await C.blockers(this.ad, this.root, c).catch(() => ["Could not check"]);
+    // The repository at the click: a side panel may move to another space during the checks below.
+    const c = this.c, gen = this.gv.gen, ad = this.ad, root = this.root;
+    const b = await C.blockers(ad, root, c).catch(() => ["Could not check"]);
+    if (this.gv.gen !== gen) return;
     this.blocked = b.length ? b : null; cx.notify();
     if (b.length) return;
     if (c.op === "merge") {
       const m = this.msg.value();
       // Capture the staged tree at the click; commitMerge commits only that tree for this merge.
-      const w = await this.ad.run(["write-tree"], { cwd: this.root }).catch(() => null);
+      const w = await ad.run(["write-tree"], { cwd: root }).catch(() => null);
+      if (this.gv.gen !== gen) return;
       const request = conflictMergeRequest(c, m, w);
       if (request.blocked) { this.blocked = [request.blocked]; cx.notify(); return; }
-      this.write("commit", () => C.commitMerge(this.ad, this.root, request.conflict, request.message, request.tree), cx);
-    } else this.write("conflict-continue", () => C.continueOp(this.ad, this.root, c), cx);
+      this.write("commit", () => C.commitMerge(ad, root, request.conflict, request.message, request.tree), cx);
+    } else this.write("conflict-continue", () => C.continueOp(ad, root, c), cx);
   }
   // Skip / Abort require a second confirmation tied to the revision on which they were armed.
   armed(k) { return this.arm?.k === k && this.arm.rev === this.c?.rev; }

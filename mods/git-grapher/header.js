@@ -19,6 +19,7 @@ import { settings as ggSettings, setSetting } from "./themes.js";
 // Icons are read from the installed mod folder; herdr does not read svg through a symlinked one, so scripts/dev-link.sh copies.
 const ICON = (n) => `mods/git-grapher/icons/${n}.svg`;
 const AUTO_MS = 60_000;
+const moved = (operation) => ({ operation, outcome: "refused", reason: "moved", stderr: "The graph switched to another repository before this ran." });
 const STAGE = [[640, "full"], [500, "labels"], [340, "icons"], [0, "overflow"]];
 const alpha = (c, a) => (c && c.length === 7 ? c + a : c);
 const hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -51,6 +52,7 @@ function resultText(r) {
   // Use timeout wording only for timeouts or killed processes.
   if (r.outcome === "unknown") return r.operation === "pull" && r.exitCode != null ? `Could not tell what the pull did: ${first(r.stderr)}`
     : r.stderr && !["timeout-or-not-started", "killed"].includes(r.reason) ? `Result unknown: ${first(r.stderr)}` : UNKNOWN;
+  if (r.reason === "moved") return r.stderr;
   const err = first(r.stderr);
   switch (r.operation) {
     case "fetch": return r.outcome === "completed" ? `Fetched ${r.refs.length} ref${r.refs.length === 1 ? "" : "s"} from ${r.remote}`
@@ -215,13 +217,16 @@ export class Header {
   }
 
   attach(store, cx) {
+    // bound: this attach's token. A side panel following the active space attaches again, even to a store it had before,
+    // and the earlier attach's tasks (on a cx that now throws) must end instead of touching the new binding's state.
+    const b = (this.bound = {});
     this.st = store; this.g = store.g; this.t = { ok: true, root: store.state.root }; this.ad = store.adapter;
     this.name = store.state.root.split("/").filter(Boolean).pop();
     this.sync(store.state);
     ({ branch: this.nameInput, worktree: this.pathInput, stash: this.msgInput })[this.p.dialog?.kind]?.focus(); // props.dialog: as if opened
     // once on open, then every minute while this pane lives; a failure stops it until a manual Fetch succeeds.
     // Not while writes wait or run: an auto fetch must not delay or overlap them (a pull or push in particular).
-    cx.spawn(async (cx) => { for (;;) { if (this.autoFetchOk()) await this.fetchTask(cx, true); await cx.sleep(AUTO_MS); } });
+    cx.spawn(async (cx) => { while (this.bound === b) { if (this.autoFetchOk()) await this.fetchTask(cx, true); await cx.sleep(AUTO_MS); } });
     this.checkUpdate(cx, false); // the gear's ↑ when a newer release exists (cached for a day)
   }
   // Settings → Updates. upd: { version, latest, available, helper, dev, busy?, text? }
@@ -248,20 +253,22 @@ export class Header {
   async fetchTask(cx, auto) {
     if (this.fetching || !this.h) return;
     if (auto && (this.netRunning || this.netQueued)) return;
+    const st = this.st, b = this.bound; // a side panel may move on meanwhile: this fetch's ending is then not the new binding's
     this.fetching = true; if (!auto) this.setSnack(cx, { busy: "fetch" }); cx.notify();
     // Fetch stays outside the write queue so its 30 s exec limit cannot block staging. It touches refs, not the index.
     // Network jobs cannot overlap: Pull / Push await an active fetch; a Fetch clicked during either queues behind it.
     let r;
     try {
       // A Pull / Push already queued counts as running: a Fetch slipping in before it would move the refs it was planned on.
-      const queued = !!(this.netRunning || this.netQueued), job = queued ? this.st.write("fetch", () => this.g.fetch(this.t, this.h)) : this.g.fetch(this.t, this.h);
+      const queued = !!(this.netRunning || this.netQueued), job = queued ? st.write("fetch", () => (this.st === st ? this.g.fetch(this.t, this.h) : moved("fetch"))) : this.g.fetch(this.t, this.h);
       this.fetchJob = job.catch(() => null);
       // Pull / Push await only an outside-queue fetch. Waiting for a fetch queued behind them would deadlock
       // a Push -> Push -> Fetch sequence.
       if (!queued) this.freeFetch = this.fetchJob;
       r = await job;
     } catch (e) { r = { operation: "fetch", outcome: "unknown", reason: String(e?.message ?? e) }; } // a throw must not leave "fetching" set
-    finally { this.fetchJob = null; this.freeFetch = null; this.fetching = false; }
+    finally { if (this.bound === b) { this.fetchJob = null; this.freeFetch = null; this.fetching = false; } }
+    if (this.bound !== b) return;
     this.refresh();
     if (!auto) this.setSnack(cx, { busy: null, r }); // auto fetch stays quiet: its state is the status block
     if (r.outcome === "completed" || r.outcome === "noop") { this.lastFetch = new Date(); this.autoStopped = false; this.fetchErr = null; }
@@ -270,23 +277,27 @@ export class Header {
     cx.notify();
   }
 
-  // All views share the store's write queue; a click waits its turn rather than being dropped.
+  // All views share the store's write queue; a click waits its turn rather than being dropped. A write still waiting when
+  // the graph moves to another repository (a side panel following the active space) is refused, never run on the new one.
   op(name, fn, cx) {
     if (!this.st) return;
     this.busy = name; this.menu = null; this.setSnack(cx, { busy: name });
     // Await an active outside-queue fetch before Pull / Push so network jobs cannot overlap.
-    const net = name === "pull" || name === "push";
+    const net = name === "pull" || name === "push", st = this.st;
     if (net) this.netQueued = (this.netQueued ?? 0) + 1;
     cx.spawn(async (cx) => {
-      const r = await this.st.write(name, async () => {
+      const r = await st.write(name, async () => {
+        if (this.st !== st) return moved(name);
         if (!net) return fn();
         if (this.freeFetch) await this.freeFetch;
+        if (this.st !== st) return moved(name);
         this.netRunning = true;
         try { return await fn(); } finally { this.netRunning = false; }
       }).finally(() => { if (net) this.netQueued--; if (name === "pull") this.pulling = Math.max(0, (this.pulling ?? 0) - 1); });
       if (this.busy === name) this.busy = null;
-      // git refused to switch over local changes → the choice to stash them first, instead of a red card.
-      if (r?.operation === "switch" && r.outcome === "refused" && !r.stashed && /would be overwritten/.test(r.stderr ?? "")) {
+      // git refused to switch over local changes → the choice to stash them first, instead of a red card. Not once the
+      // graph moved to another repository: its "Stash and switch" would act there; the card still tells what happened.
+      if (this.st === st && r?.operation === "switch" && r.outcome === "refused" && !r.stashed && /would be overwritten/.test(r.stderr ?? "")) {
         this.snack = null; this.dialog = { kind: "switch-dirty", name: r.name, remote: r.remote, files: (r.stderr.match(/^\t(.+)$/gm) ?? []).map((l) => l.trim()) }; cx.notify(); return;
       }
       this.setSnack(cx, { busy: null, r });
@@ -297,15 +308,17 @@ export class Header {
   pull(cx, confirmed = null) { cx.spawn((cx) => this.pullTask(cx, confirmed)); }
   async pullTask(cx, confirmed) {
     if (!confirmed && this.states.length) { this.dialog = { kind: "states" }; cx.notify(); return; }
+    const st = this.st; // the repository this pull is for: the graph may move to another while it previews
     this.busy = "pull"; this.pulling = (this.pulling ?? 0) + 1; this.dialog = null; this.setSnack(cx, { busy: "preview" });
     if (this.fetchJob) await this.fetchJob; // predict on the refs a running fetch brings, not the ones before it
-    const p = await previewPull(this.ad.run, { cwd: this.t.root }).catch((e) => ({ ok: false, error: { message: String(e) } }));
+    const p = this.st !== st ? null : await previewPull(this.ad.run, { cwd: this.t.root }).catch((e) => ({ ok: false, error: { message: String(e) } }));
     this.busy = null; this.snack = null;
+    if (this.st !== st) { this.pulling = Math.max(0, this.pulling - 1); this.setSnack(cx, { busy: null, r: moved("pull") }); return; }
     const basis = p.ok ? `${p.data.basis.headOid}:${p.data.basis.upstreamOid}` : null;
     // Re-read HEAD and upstream when confirming; if the prediction's basis changed, show a fresh prediction instead.
     // A change the preview saw while it read (observed-basis-changed) is stale too, even if HEAD and upstream look the same.
-    const moved = p.ok && p.data.history?.reason === "observed-basis-changed";
-    const stale = !!confirmed && ((confirmed.basis && basis !== confirmed.basis) || moved);
+    const shifted = p.ok && p.data.history?.reason === "observed-basis-changed";
+    const stale = !!confirmed && ((confirmed.basis && basis !== confirmed.basis) || shifted);
     if (!stale && (confirmed?.ok || (p.ok && p.data.predicted === "clean"))) return this.op("pull", () => this.pullAt(basis), cx);
     this.pulling = Math.max(0, this.pulling - 1); // the dialog keeps auto fetch paused from here (dialog.kind)
     this.dialog = { kind: "pull", p, basis, stale, at: new Date(), open: ggSettings().verbose }; cx.notify();
@@ -317,11 +330,12 @@ export class Header {
   // HEAD: "Pull anyway") or a read that fails, git pull decides, as on the command line.
   // ponytail: a ref moving between this check and git pull's own start is still possible; git pull itself is the last word.
   async pullAt(basis) {
-    const r = /^[0-9a-f]+:[0-9a-f]+$/.test(basis ?? "") ? await this.ad.run(["rev-parse", "HEAD", "@{upstream}"], { cwd: this.t.root }).catch(() => null) : null;
+    const { ad, g, t } = this; // the repository this pull was queued for, even if the graph moves meanwhile
+    const r = /^[0-9a-f]+:[0-9a-f]+$/.test(basis ?? "") ? await ad.run(["rev-parse", "HEAD", "@{upstream}"], { cwd: t.root }).catch(() => null) : null;
     const now = r?.code === 0 ? r.stdout.trim().split("\n").join(":") : null;
     if (now && now !== basis) return { operation: "pull", outcome: "refused", reason: "stale",
       stderr: "The branch or its upstream moved after the preview. Pull again to see what it would do now." };
-    return this.g.pull(this.t);
+    return g.pull(t);
   }
 
   createBranch(cx) {

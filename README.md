@@ -73,6 +73,8 @@ Keys, in the `"global"` section of `~/.config/herdr-app/keys.json`:
 
   ![An agent commits; the graph shows the new commit](docs/media/claude-and-graph.gif)
 
+- In a layout's side panel, the graph follows the space you switch to.
+
 - Click a commit for its files; click a file for the diff (Unified or Split, syntax-coloured with the helper). File History from the file's right-click menu; `↑` / `↓` to step through it.
 
   ![Commit, diff, split view, file history](docs/media/diff-and-history.gif)

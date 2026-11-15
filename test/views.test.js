@@ -361,3 +361,118 @@ test("pull: no basis to compare (no upstream / detached / unborn, 'Pull anyway')
     assert.equal(r.reason === "stale" ? "stale" : pulled ? "pull" : "none", want, `${basisStr} ${code}`);
   }
 });
+
+// A side panel is one copy for every space: a space switch binds it to the new space's repository, and the old binding's
+// news stops applying, so actions can't reach the previous repository. Coming back reuses the repository's store, and its
+// drive: each drive holds a watch per worktree open, so one per visit piled up until Herdr's host-task limit stalled the copy.
+test("side panel: a space switch rebinds the graph to that space's repository; a store is driven once", async () => {
+  let active = "A"; const stores = new Map(), drives = [], applied = [];
+  const storeFor = (_ad, root) => {
+    if (!stores.has(root)) { let wake; stores.set(root, { state: { root }, next: () => new Promise((r) => { wake = r; }), refresh: async () => {}, push: (s) => wake(s) }); }
+    return stores.get(root);
+  };
+  const GraphView = load("graph.js", "GraphView", { spaces: () => [{ id: active, active: true }], gitRun: async (_c, _a, { cwd }) => ({ code: 0, stdout: cwd }),
+    storeFor, herdrAdapter: () => ({}), exec: null, drive: (st) => drives.push(st.state.root) });
+  const gv = Object.create(GraphView.prototype);
+  Object.assign(gv, { p: {}, dv: {}, hd: { attach() {} }, cv: {}, locate: async () => ({ dir: "/" + active }), apply: (s) => applied.push(s) });
+  const cx = { notify() {}, sleep: tick, spawn(fn) { return Promise.resolve().then(() => fn(cx)); } };
+  const settle = async () => { for (let i = 0; i < 4; i++) await tick(); };
+  gv.retarget(cx); await gv.attach(cx); await tick();
+  stores.get("/A").push("A1"); await tick();
+  active = "B"; gv.retarget(cx); await settle();
+  assert.equal(gv.repo, "/B");
+  stores.get("/A").push("A2"); stores.get("/B").push("B1"); await settle();
+  assert.deepEqual(applied, ["A1", "B1"]);
+  gv.retarget(cx); assert.equal(stores.size, 2, "no rebind while the space stays");
+  active = "A"; gv.retarget(cx); await settle(); active = "B"; gv.retarget(cx); await settle();
+  assert.deepEqual(drives, ["/A", "/B"]);
+});
+
+// Header and Conflict Mode writes read the bound repository when they run. One still waiting in the old repository's
+// queue when the graph moves to another must be refused, not run on the new repository.
+test("a write queued before a space switch is refused once it runs; nothing reaches the new repository", async () => {
+  const Header = load("header.js", "Header"), ConflictView = load("conflict-view.js", "ConflictView");
+  const log = [], storeA = chain(log), storeB = chain(log), block = deferred(), ran = [], results = [];
+  const g = (root) => ({ cherryPick: (t) => ran.push(`${root} cherry-pick in ${t.root}`) });
+  const hd = Object.assign(Object.create(Header.prototype), { st: storeA, g: g("A"), t: { root: "/A" }, setSnack: (_cx, s) => s.r && results.push(s.r) });
+  const gv = { hd, st: storeA }, cv = Object.assign(Object.create(ConflictView.prototype), { gv, sync() {} });
+  storeA.write("blocker", () => block.promise);
+  hd.op("cherry-pick", () => hd.g.cherryPick(hd.t, ["c"]), cx);
+  cv.write("conflict-abort", () => ran.push(`abort in ${cv.root}`), cx);
+  await tick();
+  Object.assign(hd, { st: storeB, g: g("B"), t: { root: "/B" } }); gv.st = storeB; // the graph moved to B
+  block.resolve(); for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(ran, []);
+  assert.deepEqual(results.map((r) => [r.operation, r.reason]), [["cherry-pick", "moved"], ["conflict-abort", "moved"]]);
+});
+
+// A switch already running on A that git refuses over local changes must not open "Stash and switch" once the graph is
+// on B: that dialog's action reads the current repository. The card still reports A's refusal.
+test("a switch refused after a space switch shows its card, not the stash-and-switch dialog", async () => {
+  const Header = load("header.js", "Header");
+  const block = deferred(), results = [];
+  const hd = Object.assign(Object.create(Header.prototype), { st: chain([]), dialog: null, setSnack: (_cx, s) => s.r && results.push(s.r) });
+  hd.op("switch", () => block.promise, cx);
+  await tick(); hd.st = chain([]); // the graph moved to B while git ran on A
+  block.resolve({ operation: "switch", outcome: "refused", name: "feat", stderr: "error: Your local changes would be overwritten by checkout:\n\ta.txt" });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(hd.dialog, null);
+  assert.deepEqual(results.map((r) => r.operation), ["switch"]);
+});
+
+// A side panel attaches again on each space switch, possibly to a store it had before. The earlier attach's auto-fetch
+// loop wakes on a cx that now throws: it must end before touching the header, or a stuck "fetching" blocks every fetch.
+test("header: an earlier attach's auto-fetch loop ends at a rebind, even to the same store", async () => {
+  const Header = load("header.js", "Header", { updateState: async () => ({}) });
+  const st = { g: {}, adapter: {}, state: { root: "/A", head: null, states: [], stashes: [], error: null } }, sleeps = [], fetched = [];
+  const c = { notify() {}, sleep: () => new Promise((r) => sleeps.push(r)), spawn(fn) { return Promise.resolve().then(() => fn(c)); } };
+  const hd = Object.assign(Object.create(Header.prototype), { p: {}, autoFetchOk: () => true, fetchTask: async () => { fetched.push(1); } });
+  hd.attach(st, c); await tick();
+  hd.bound = null; hd.attach(st, c); await tick(); // retarget, then back to the same store
+  sleeps[0](); await tick(); await tick();
+  assert.equal(fetched.length, 2, "the first loop woke and ended without fetching");
+});
+
+// Conflict Mode reads and Commit merge's checks await git. A rebind meanwhile drops the old binding's result: no conflict
+// from A shown on B, no commit queued, and B can start its own read.
+test("conflict view: a read or Commit merge that outlives a rebind is dropped", async () => {
+  const read = deferred(), check = deferred(), applied = [], written = [];
+  const C = { readConflict: () => read.promise, blockers: () => check.promise };
+  const ConflictView = load("conflict-view.js", "ConflictView", { C });
+  const gv = { gen: 1, st: { adapter: {}, state: { root: "/A" } } };
+  const cv = Object.assign(Object.create(ConflictView.prototype), { gv, c: { op: "merge" }, apply: async (x) => applied.push(x), write: (n) => written.push(n) });
+  cv.sync({ head: { unmerged: 1 }, states: [] }, cx);
+  const done = cv.finish(cx);
+  await tick(); gv.gen = 2; // the panel moved to another space
+  read.resolve({ rev: "A" }); check.resolve([]); await done; await tick(); await tick();
+  assert.deepEqual([applied, written, cv.reading], [[], [], false]);
+});
+
+// Applying a conflict checks the open draft's file on disk (hash-object) before following it. If the panel rebinds
+// meanwhile and B has a draft at the same path, A's late result must not drop B's draft.
+test("conflict view: a disk check that outlives a rebind leaves the new binding's draft alone", async () => {
+  const hash = deferred(), ConflictView = load("conflict-view.js", "ConflictView");
+  const gv = { gen: 1, st: { adapter: { run: () => hash.promise }, state: { root: "/A" } } }, file = { path: "x.txt", e: {} };
+  const draftA = { file, f: { workId: "old" }, choices: [] }, draftB = { file, f: { workId: "b" }, choices: [] };
+  const cv = Object.assign(Object.create(ConflictView.prototype), { gv, c: { op: "rebase", files: [file] }, sel: "x.txt", drafts: new Map([["x.txt", draftA]]) });
+  const done = cv.apply({ op: "rebase", files: [file] }, cx);
+  await tick(); gv.gen = 2; cv.drafts = new Map([["x.txt", draftB]]); // the panel moved to B, which opened the same path
+  hash.resolve({ code: 0, stdout: "changed\n" }); await done;
+  assert.equal(cv.drafts.get("x.txt"), draftB);
+});
+
+// A Pull reads its preview before it queues: the graph moving meanwhile (during the fetch it waits for, or the preview's
+// own git reads) must drop it, not queue it on the new repository or show the old prediction there.
+test("a Pull whose preview outlives a space switch is dropped, not queued on the new repository", async () => {
+  const Header = load("header.js", "Header", { previewPull: async (run) => (await run([]), { ok: false, error: { message: "stub" } }) });
+  for (const at of ["fetch", "preview"]) {
+    const block = deferred(), queued = [], results = [];
+    const hd = Object.assign(Object.create(Header.prototype), { st: chain([]), states: [], t: { root: "/A" },
+      ad: { run: () => (at === "preview" ? block.promise : Promise.resolve({ code: 1, stdout: "", stderr: "" })) },
+      fetchJob: at === "fetch" ? block.promise : null, op: (name) => queued.push(name), setSnack: (_cx, s) => s.r && results.push(s.r) });
+    const done = hd.pullTask(cx, { ok: true, basis: null }); // "Pull anyway": no basis to go stale
+    await tick(); hd.st = chain([]); hd.t = { root: "/B" }; // the graph moved to B
+    block.resolve({ code: 1, stdout: "", stderr: "" }); await done;
+    assert.deepEqual([queued, results.map((r) => r.reason), hd.dialog, hd.pulling], [[], ["moved"], null, 0], at);
+  }
+});
